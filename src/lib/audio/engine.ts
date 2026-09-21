@@ -34,7 +34,10 @@ class AudioEngine {
 
     const element = new Audio();
     element.preload = "metadata";
-    element.crossOrigin = "anonymous";
+    // crossOrigin is deliberately unset. It is only needed to read raw samples
+    // (Web Audio analysis), which this player never does, and setting it makes
+    // the browser *require* CORS headers on the stream. Leaving it off keeps
+    // playback working on instances that do not send them.
 
     element.addEventListener("timeupdate", () => {
       this.emit({
