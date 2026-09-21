@@ -90,6 +90,31 @@ export const usePlayerStore = create<PlayerStore>()(
         if (mode === "video") void get().resolveMusicVideo({ loadWhenDone: true });
       };
 
+      /**
+       * Which source the engine should be holding for the current selection.
+       * In video mode that is the resolved music video when one was found.
+       */
+      const expectedSourceId = (): string | null => {
+        const state = get();
+        const track = state.queue[state.currentIndex >= 0 ? state.currentIndex : 0];
+        if (!track) return null;
+        return state.playbackMode === "video" && state.videoSourceId ? state.videoSourceId : track.sourceId;
+      };
+
+      /**
+       * True when the engine holds nothing playable for the current selection.
+       *
+       * The queue is persisted but playback position and the media element are
+       * not, so a returning listener restores a queue with a track selected and
+       * an empty element behind it. Calling play() then resolves against no
+       * media: no request is made, nothing sounds, and the UI shows a paused
+       * player that never starts. Reloading the track is the fix.
+       */
+      const needsLoad = (): boolean => {
+        const expected = expectedSourceId();
+        return expected !== null && audioEngine.getSourceId() !== expected;
+      };
+
       /** Consecutive failed loads; reset as soon as anything plays. */
       let consecutiveFailures = 0;
       /** Handle for the sleep timer, so a new one replaces the old. */
@@ -137,13 +162,19 @@ export const usePlayerStore = create<PlayerStore>()(
         playTrack: (track, origin) => get().playQueue([track], 0, origin),
 
         togglePlay: () => {
-          const { isPlaying, currentIndex, queue } = get();
-          if (currentIndex < 0 && queue.length > 0) return startIndex(0);
+          const { isPlaying, queue } = get();
+          if (!queue.length) return;
+          if (needsLoad()) return startIndex(Math.max(0, get().currentIndex));
           if (isPlaying) audioEngine.pause();
           else void audioEngine.play();
         },
 
-        play: () => void audioEngine.play(),
+        play: () => {
+          if (!get().queue.length) return;
+          if (needsLoad()) return startIndex(Math.max(0, get().currentIndex));
+          void audioEngine.play();
+        },
+
         pause: () => audioEngine.pause(),
 
         next: ({ userInitiated = true } = {}) => {
