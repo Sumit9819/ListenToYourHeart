@@ -125,7 +125,9 @@ const requestTimeoutMs = 8_000;
  * measurably slower from datacenter IPs than from a home connection — so the
  * search timeout is tight enough to abandon a request that would have worked.
  */
-const streamTimeoutMs = 15_000;
+const streamDeadlineMs = 9_000;
+/** The Piped fallback rarely succeeds for streams, so it gets a short leash. */
+const pipedStreamDeadlineMs = 5_000;
 
 /**
  * Upper bound for a result on the "Songs" tab.
@@ -185,63 +187,112 @@ interface ProviderResponse<T> {
   origin: string;
 }
 
+/** One attempt against one instance. Throws on any unusable answer. */
+async function fetchFromInstance<T>(
+  provider: ProviderInstance,
+  path: string,
+  signal: AbortSignal,
+): Promise<ProviderResponse<T>> {
+  const response = await fetch(`${provider.origin}${path}`, {
+    headers: { Accept: "application/json" },
+    signal,
+    cache: "no-store",
+  });
+
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+  // A web frontend answers 200 with HTML. Without this check the JSON parse
+  // would throw somewhere far less obvious.
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("json")) throw new Error(`non-JSON (${contentType || "no content type"})`);
+
+  const body: unknown = await response.json();
+
+  // Both Piped and Invidious report upstream failures as 200 + {error}.
+  // Treating that as success would pin us to a broken instance.
+  if (body && typeof body === "object" && "error" in body) {
+    const detail = (body as { error?: unknown }).error;
+    throw new Error(typeof detail === "string" ? detail.slice(0, 120) : "provider reported an error");
+  }
+
+  return { body: body as T, origin: provider.origin };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Asks every configured instance, hedged, and returns the first usable answer.
+ *
+ * Previously this walked the list one instance at a time, each with its own
+ * timeout. With four instances and a 15s timeout the worst case was a full
+ * minute of waiting before reporting failure — and because these instances are
+ * individually unreliable, the worst case happened often.
+ *
+ * Instead the first instance starts immediately and each subsequent one joins
+ * `hedgeMs` later, so a healthy first instance still answers alone and costs
+ * the others nothing, while a slow one no longer blocks the rest. The first
+ * success wins and cancels the stragglers; `deadlineMs` bounds the whole thing
+ * regardless of how many instances are configured.
+ */
 async function requestProvider<T>(
   path: string,
   kind: ProviderKind,
-  { timeoutMs = requestTimeoutMs }: { timeoutMs?: number } = {},
+  {
+    deadlineMs = requestTimeoutMs,
+    hedgeMs = 2_000,
+  }: { deadlineMs?: number; hedgeMs?: number } = {},
 ): Promise<ProviderResponse<T>> {
   const all = getConfiguredProviders().filter((provider) => provider.kind === kind);
-  const available = all.filter((provider) => (failedUntil.get(`${provider.kind}:${provider.origin}`) ?? 0) <= Date.now());
+  const available = all.filter(
+    (provider) => (failedUntil.get(`${provider.kind}:${provider.origin}`) ?? 0) <= Date.now(),
+  );
 
-  // If every instance is inside its cooldown, try them anyway. The breaker is
-  // meant to shed load from a flaky instance onto a healthy sibling; when there
-  // is no sibling left it would otherwise guarantee the failure it is meant to
-  // avoid. This is the difference between "slow" and "broken" when only one
-  // instance in the list actually works.
+  // If every instance is inside its cooldown, try them anyway. The breaker
+  // sheds load from a flaky instance onto a healthy sibling; with no sibling
+  // left it would otherwise guarantee the failure it exists to avoid.
   const providers = available.length > 0 ? available : all;
-  let lastError: unknown;
+  if (providers.length === 0) throw new Error("No provider instance is configured");
 
-  for (const provider of providers) {
-    const key = `${provider.kind}:${provider.origin}`;
+  // With a single instance there is nothing to fail over to, and the one that
+  // still resolves streams fails transiently — observed returning HTTP 400 and
+  // then succeeding minutes later, unchanged. A second staggered attempt at the
+  // same instance is the only redundancy available, and it costs nothing when
+  // the first attempt succeeds, because the winner cancels the straggler.
+  const attempts = providers.length === 1 ? [providers[0], providers[0]] : providers;
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), deadlineMs);
 
-    try {
-      const response = await fetch(`${provider.origin}${path}`, {
-        headers: { Accept: "application/json" },
-        signal: controller.signal,
-        cache: "no-store",
-      });
+  try {
+    return await Promise.any(
+      attempts.map(async (provider, index) => {
+        // Stagger the starts so a healthy first instance serves alone.
+        if (index > 0) await sleep(index * hedgeMs);
+        if (controller.signal.aborted) throw new Error("superseded");
 
-      if (!response.ok) throw new Error(`Provider returned ${response.status}`);
-
-      // A web frontend answers 200 with HTML. Without this check the JSON parse
-      // would throw somewhere far less obvious.
-      const contentType = response.headers.get("content-type") ?? "";
-      if (!contentType.includes("json")) throw new Error(`Provider returned ${contentType || "no content type"}`);
-
-      const body: unknown = await response.json();
-
-      // Both Piped and Invidious report upstream failures as 200 + {error}.
-      // Treating that as success would pin us to a broken instance instead of
-      // failing over to the next one.
-      if (body && typeof body === "object" && "error" in body) {
-        const detail = (body as { error?: unknown }).error;
-        throw new Error(typeof detail === "string" ? detail.slice(0, 120) : "Provider reported an error");
-      }
-
-      failedUntil.delete(key);
-      return { body: body as T, origin: provider.origin };
-    } catch (error) {
-      lastError = error;
-      failedUntil.set(key, Date.now() + 30_000);
-    } finally {
-      clearTimeout(timeout);
-    }
+        const key = `${provider.kind}:${provider.origin}`;
+        try {
+          const result = await fetchFromInstance<T>(provider, path, controller.signal);
+          failedUntil.delete(key);
+          return result;
+        } catch (error) {
+          // Losing a race is not evidence the instance is unhealthy.
+          if (!controller.signal.aborted) failedUntil.set(key, Date.now() + 30_000);
+          throw new Error(`${provider.origin}: ${error instanceof Error ? error.message : "failed"}`);
+        }
+      }),
+    );
+  } catch (error) {
+    const reasons =
+      error instanceof AggregateError
+        ? error.errors.map((e) => (e instanceof Error ? e.message : String(e))).join("; ")
+        : String(error);
+    throw new Error(`No ${kind} instance answered: ${reasons}`.slice(0, 300));
+  } finally {
+    clearTimeout(deadline);
+    // Cancel any straggler still in flight once we have what we need.
+    controller.abort();
   }
-
-  throw new Error(lastError instanceof Error ? lastError.message : "No provider instance is available");
 }
 
 function sourceIdFromUrl(url: string | undefined, fallback?: string, videoId?: string): string | null {
@@ -594,7 +645,7 @@ export async function getAudioStream(videoId: string, mode: PlaybackMode = "audi
     const { body: response } = await requestProvider<PipedStreamResponse>(
       `/streams/${encodeURIComponent(videoId)}`,
       "piped",
-      { timeoutMs: streamTimeoutMs },
+      { deadlineMs: pipedStreamDeadlineMs },
     );
 
     const hlsUrl = response.hls;
@@ -648,6 +699,7 @@ async function getInvidiousStream(videoId: string, mode: PlaybackMode): Promise<
   const { body: video, origin } = await requestProvider<InvidiousVideoResponse>(
     `/api/v1/videos/${encodeURIComponent(videoId)}?local=true`,
     "invidious",
+    { deadlineMs: streamDeadlineMs },
   );
 
   /** Instances may return proxy URLs relative to their own origin. */

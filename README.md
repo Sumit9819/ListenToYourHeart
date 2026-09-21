@@ -69,9 +69,17 @@ Public instances are unreliable by nature, and the two halves fail
 independently:
 
 - **Search and suggestions** work well across most live instances.
-- **Stream resolution** is the scarce capability. Of roughly 30 public instances
-  surveyed, one still extracts streams reliably, so `INVIDIOUS_INSTANCES` is the
-  setting most likely to need changing over time.
+- **Stream resolution** is the scarce capability. Two sweeps of ~25-30 public
+  instances each found exactly **one** that still extracts streams, and it fails
+  transiently — observed returning HTTP 400 and then succeeding minutes later,
+  unchanged. `INVIDIOUS_INSTANCES` is the setting most likely to need changing.
+
+Because of that, instances are queried **hedged** rather than one after another:
+the first starts immediately and each other joins 2s later, first usable answer
+wins and cancels the rest, with a hard deadline over the whole thing. Where only
+one instance is configured it is hedged against itself, since a second staggered
+attempt is the only redundancy available. This replaced sequential per-instance
+timeouts whose worst case was a full minute of waiting before reporting failure.
 
 Streams are requested with Invidious' `local=true`, which serves media from the
 instance's own domain. This matters more than it sounds: direct upstream URLs
