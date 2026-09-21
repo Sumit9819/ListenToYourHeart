@@ -3,6 +3,7 @@
 import { ChevronLeft, ChevronRight, Keyboard, Moon, Sun } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Suspense } from "react";
+import { AccountMenu } from "@/components/shell/AccountMenu";
 import { SearchBox } from "@/components/shell/SearchBox";
 import { useUiStore } from "@/store/uiStore";
 
@@ -58,6 +59,7 @@ export function TopBar() {
         >
           {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
         </button>
+        <AccountMenu />
       </div>
     </header>
   );

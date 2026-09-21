@@ -10,12 +10,17 @@ Tailwind CSS 4.
 
 **Playback**
 
-- A Watch button that finds the artist's real music video and opens the
-  watch layout, without interrupting what is already playing
-- Video mode finds the artist's real music video, not the still-image Art Track
+- A Watch button that finds the artist's real music video — not the
+  still-image Art Track — and opens the watch layout without interrupting
+  what is already playing
+- Full controls on the video itself: play, skip, scrub, volume, speed,
+  picture-in-picture and fullscreen, fading away while you watch
 - Watch layout: video beside the queue, so the queue stays reachable
-- Picture-in-picture and a dockable video stage that follows you between pages
-- Sleep timer, shuffle, repeat and picture-in-picture in the player overflow menu
+- A dockable video stage that follows you between pages
+- When a video rendition cannot be extracted, the audio one plays instead of
+  the track being skipped
+- Playback speed from 0.5x to 2x, sleep timer, shuffle and repeat in the
+  player overflow menu
 - Gapless queue with working shuffle and repeat (off / all / one)
 - Drag-to-reorder queue, play next, add to queue
 - Scrub bar with buffered-ahead indicator and hover time preview
@@ -29,12 +34,15 @@ Tailwind CSS 4.
 - Favorites, with one-tap hearting from anywhere
 - Listening history with play counts, plus an "On repeat" shelf
 - JSON export and import, so a library can move between browsers
+- Optional Google sign-in: with a database configured, playlists, favorites and
+  history follow an account between devices (see below)
 
 **Interface**
 
 - Responsive down to phone width: sidebar on desktop, tab bar and a full-screen
   now-playing sheet on mobile
 - Light and dark themes, applied before first paint (no flash)
+- Search split into songs and videos, with a combined view and a tab for each
 - Search with provider suggestions and locally stored recent searches
 - Keyboard shortcuts throughout — press <kbd>?</kbd> for the full list
 - Skeleton loaders, toasts with undo, and empty states that say what to do next
@@ -115,9 +123,54 @@ the artist's actual upload and switches to it, keeping your position.
 | `npm start` | Serve the production build |
 | `npm run lint` | ESLint |
 | `npm run typecheck` | `next typegen` then `tsc --noEmit` |
+| `npm run check:sync` | Runs the sync route SQL against a real Postgres (PGlite) |
 
 `next typegen` must run before `tsc` because `typedRoutes` is enabled: route
 types are generated into `.next/types`.
+
+## Accounts and cross-device sync (optional)
+
+Without any of this configured the app is unchanged: the library lives in the
+browser, there is no sign-in control, and nothing leaves the device. Adding a
+database and Google credentials turns on **Sign in with Google**, and each
+account's playlists, favorites and listening history follow them to any device
+they sign in on.
+
+The local database stays the source of truth for everything on screen. The
+cloud copy is a replica that is merged in the background, so the app keeps
+working offline and a failed sync never blocks playback.
+
+### What to create
+
+1. **A Postgres database.** [Neon](https://neon.com)'s free tier is the easiest
+   fit on Vercel: it is in the Vercel marketplace, injects the connection
+   string for you, and scales to zero without the project going to sleep. Copy
+   the **pooled** connection string into `DATABASE_URL`.
+2. **A Google OAuth client.** Google Cloud console → *APIs & Services* →
+   *Credentials* → *Create credentials* → *OAuth client ID* → *Web application*.
+   Add an authorised redirect URI of
+   `https://YOUR-DOMAIN/api/auth/callback/google` (and
+   `http://localhost:3000/api/auth/callback/google` for local work). Copy the
+   two values into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+3. **A session secret.** `openssl rand -base64 32` into `BETTER_AUTH_SECRET`.
+
+Set all four under **Project → Settings → Environment Variables** and redeploy.
+No migration step is needed: the tables are created on the first request that
+needs them.
+
+`GET /api/accounts` reports whether accounts are on and, if not, exactly which
+variables are still missing.
+
+### How conflicts resolve
+
+Every saved row carries the time it last changed, and the newest version wins.
+Deletes are recorded as tombstones rather than as absent rows, so removing a
+favorite on your phone removes it on your laptop instead of being restored by
+the next sync. `npm run check:sync` runs those rules against a real Postgres.
+
+Signing a *second* account into a browser that already has a library pulls that
+account's data down but does not upload what was already there — otherwise a
+friend signing in on your machine would quietly absorb your playlists.
 
 ## Deploying to Vercel
 
@@ -150,15 +203,17 @@ import elsewhere.
 src/
   app/              Routes, API handlers, error and loading boundaries
   components/
-    player/         Player bar, seek bar, queue, now-playing, video stage, sleep timer
+    player/         Player bar, seek bar, queue, now-playing, video stage, video controls
     shell/          Sidebar, top bar, search box, mobile nav
     track/          Track rows, cards, collection headers, dialogs
     ui/             Artwork, menu, modal, toasts, skeletons, empty states
   hooks/            Audio controller, keyboard shortcuts, live DB queries
   lib/
     audio/engine.ts Singleton that owns the media element and hls.js
-    db/             Dexie schema and all library reads/writes
+    auth/           Better Auth server config and browser client (optional)
+    db/             Dexie schema, library reads/writes, the Postgres pool
     providers/      Provider clients, normalisation and failover
+    sync/           Wire format, change notifications, the browser sync engine
   store/            Zustand stores for the player and UI
   types/            Shared domain types
 ```

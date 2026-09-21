@@ -1,6 +1,8 @@
 "use client";
 
 import { musicDatabase, type ListeningHistoryRecord, type PlaylistRecord } from "@/lib/db/database";
+import { libraryChanged, recordDeletion } from "@/lib/sync/dirty";
+import { playlistTrackKey } from "@/lib/sync/types";
 import type { Playlist, Track } from "@/types/music";
 
 const HISTORY_LIMIT = 500;
@@ -31,6 +33,7 @@ export async function createPlaylist(name: string, description?: string): Promis
     trackCount: 0,
   };
   await musicDatabase.playlists.add(playlist);
+  libraryChanged();
   return playlist;
 }
 
@@ -40,13 +43,28 @@ export async function renamePlaylist(playlistId: string, name: string, descripti
     description: description?.trim() || undefined,
     updatedAt: Date.now(),
   });
+  libraryChanged();
 }
 
 export async function deletePlaylist(playlistId: string): Promise<void> {
-  await musicDatabase.transaction("rw", musicDatabase.playlists, musicDatabase.playlistTracks, async () => {
-    await musicDatabase.playlistTracks.where("playlistId").equals(playlistId).delete();
-    await musicDatabase.playlists.delete(playlistId);
-  });
+  const removed = await musicDatabase.transaction(
+    "rw",
+    musicDatabase.playlists,
+    musicDatabase.playlistTracks,
+    async () => {
+      const rows = await musicDatabase.playlistTracks.where("playlistId").equals(playlistId).toArray();
+      await musicDatabase.playlistTracks.where("playlistId").equals(playlistId).delete();
+      await musicDatabase.playlists.delete(playlistId);
+      return rows.map((row) => row.trackId);
+    },
+  );
+
+  // Written outside the transaction above: tombstones are not in its scope,
+  // and Dexie rejects a write to a table a transaction did not declare.
+  // Each membership is its own synced row, so each needs its own tombstone.
+  await recordDeletion("playlist", playlistId);
+  for (const trackId of removed) await recordDeletion("playlist_track", playlistTrackKey(playlistId, trackId));
+  libraryChanged();
 }
 
 export async function getPlaylist(playlistId: string): Promise<Playlist | undefined> {
@@ -83,6 +101,7 @@ export async function addTracksToPlaylist(playlistId: string, tracks: Track[]): 
         track,
         position: highestPosition + POSITION_STEP * (offset + 1),
         addedAt: now,
+        updatedAt: now,
       })),
     );
     await musicDatabase.playlists.update(playlistId, {
@@ -92,6 +111,9 @@ export async function addTracksToPlaylist(playlistId: string, tracks: Track[]): 
       ...(existing.length === 0 && additions[0]?.albumArtUrl ? { coverUrl: additions[0].albumArtUrl } : {}),
     });
     return additions.length;
+  }).then((added) => {
+    if (added > 0) libraryChanged();
+    return added;
   });
 }
 
@@ -101,6 +123,8 @@ export async function removeTrackFromPlaylist(playlistId: string, trackId: strin
     const remaining = await musicDatabase.playlistTracks.where("playlistId").equals(playlistId).count();
     await musicDatabase.playlists.update(playlistId, { trackCount: remaining, updatedAt: Date.now() });
   });
+  await recordDeletion("playlist_track", playlistTrackKey(playlistId, trackId));
+  libraryChanged();
 }
 
 /** Moves the track at `from` to index `to` within the playlist's own order. */
@@ -120,11 +144,16 @@ export async function reorderPlaylistTrack(playlistId: string, from: number, to:
       reordered.map((row, index) =>
         row.position === (index + 1) * POSITION_STEP
           ? Promise.resolve(0)
-          : musicDatabase.playlistTracks.update(row.id as number, { position: (index + 1) * POSITION_STEP }),
+          : musicDatabase.playlistTracks.update(row.id as number, {
+              position: (index + 1) * POSITION_STEP,
+              // A move is a change to sync, even though nothing was added.
+              updatedAt: Date.now(),
+            }),
       ),
     );
     await musicDatabase.playlists.update(playlistId, { updatedAt: Date.now() });
   });
+  libraryChanged();
 }
 
 export async function playlistsContainingTrack(trackId: string): Promise<Set<string>> {
@@ -145,9 +174,12 @@ export async function toggleLike(track: Track): Promise<boolean> {
   const existing = await musicDatabase.likedTracks.get(track.id);
   if (existing) {
     await musicDatabase.likedTracks.delete(track.id);
+    await recordDeletion("liked", track.id);
+    libraryChanged();
     return false;
   }
   await musicDatabase.likedTracks.put({ trackId: track.id, track, likedAt: Date.now() });
+  libraryChanged();
   return true;
 }
 
@@ -190,6 +222,7 @@ export async function recordPlay(track: Track): Promise<void> {
         await musicDatabase.listeningHistory.bulkDelete(stale);
       }
     });
+    libraryChanged();
   } catch {
     // History is a convenience; never let it break playback.
   }
@@ -288,5 +321,6 @@ export async function importLibrary(backup: LibraryBackup): Promise<{ playlists:
     liked.map((track) => ({ trackId: track.id, track, likedAt: Date.now() })),
   );
 
+  libraryChanged();
   return { playlists: importedPlaylists, liked: liked.length };
 }
