@@ -160,7 +160,13 @@ function getConfiguredProviders(): ProviderInstance[] {
   });
 }
 
-async function requestProvider<T>(path: string, kind: ProviderKind): Promise<T> {
+interface ProviderResponse<T> {
+  body: T;
+  /** Origin of the instance that answered; needed to resolve relative URLs. */
+  origin: string;
+}
+
+async function requestProvider<T>(path: string, kind: ProviderKind): Promise<ProviderResponse<T>> {
   const providers = getConfiguredProviders().filter((provider) => provider.kind === kind);
   let lastError: unknown;
 
@@ -196,7 +202,7 @@ async function requestProvider<T>(path: string, kind: ProviderKind): Promise<T> 
       }
 
       failedUntil.delete(key);
-      return body as T;
+      return { body: body as T, origin: provider.origin };
     } catch (error) {
       lastError = error;
       failedUntil.set(key, Date.now() + 30_000);
@@ -311,7 +317,7 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
   let anyProviderResponded = false;
 
   try {
-    const body = await requestProvider<PipedSearchResponse>(
+    const { body } = await requestProvider<PipedSearchResponse>(
       `/search?q=${encodeURIComponent(normalizedQuery)}&filter=${encodeURIComponent(PIPED_FILTERS[filter])}`,
       "piped",
     );
@@ -327,7 +333,7 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
   }
 
   try {
-    const invidious = await requestProvider<InvidiousSearchItem[]>(
+    const { body: invidious } = await requestProvider<InvidiousSearchItem[]>(
       `/api/v1/search?q=${encodeURIComponent(normalizedQuery)}&type=video`,
       "invidious",
     );
@@ -413,7 +419,10 @@ export async function getRelatedTracks(videoId: string): Promise<Track[]> {
   if (!/^[\w-]{6,}$/.test(videoId)) return [];
 
   try {
-    const response = await requestProvider<PipedStreamResponse>(`/streams/${encodeURIComponent(videoId)}`, "piped");
+    const { body: response } = await requestProvider<PipedStreamResponse>(
+      `/streams/${encodeURIComponent(videoId)}`,
+      "piped",
+    );
     const related = (response.relatedStreams ?? [])
       .map(normalizePipedTrack)
       .filter((track): track is Track => track !== null);
@@ -423,7 +432,7 @@ export async function getRelatedTracks(videoId: string): Promise<Track[]> {
   }
 
   try {
-    const video = await requestProvider<InvidiousVideoResponse>(
+    const { body: video } = await requestProvider<InvidiousVideoResponse>(
       `/api/v1/videos/${encodeURIComponent(videoId)}`,
       "invidious",
     );
@@ -441,7 +450,7 @@ export async function getSuggestions(query: string): Promise<string[]> {
   if (trimmed.length < 2) return [];
 
   try {
-    const body = await requestProvider<string[] | { suggestions?: string[] }>(
+    const { body } = await requestProvider<string[] | { suggestions?: string[] }>(
       `/suggestions?query=${encodeURIComponent(trimmed)}`,
       "piped",
     );
@@ -452,7 +461,7 @@ export async function getSuggestions(query: string): Promise<string[]> {
   }
 
   try {
-    const body = await requestProvider<{ suggestions?: string[] }>(
+    const { body } = await requestProvider<{ suggestions?: string[] }>(
       `/api/v1/search/suggestions?q=${encodeURIComponent(trimmed)}`,
       "invidious",
     );
@@ -466,7 +475,10 @@ export async function getAudioStream(videoId: string): Promise<AudioStream> {
   if (!/^[\w-]{6,}$/.test(videoId)) throw new Error("Invalid video ID");
 
   try {
-    const response = await requestProvider<PipedStreamResponse>(`/streams/${encodeURIComponent(videoId)}`, "piped");
+    const { body: response } = await requestProvider<PipedStreamResponse>(
+      `/streams/${encodeURIComponent(videoId)}`,
+      "piped",
+    );
 
     const hlsUrl = response.hls;
     if (hlsUrl) {
@@ -501,16 +513,28 @@ export async function getAudioStream(videoId: string): Promise<AudioStream> {
     // Fall through to Invidious.
   }
 
-  const video = await requestProvider<InvidiousVideoResponse>(
-    `/api/v1/videos/${encodeURIComponent(videoId)}`,
+  // `local=true` asks the instance to serve the media from its own domain
+  // instead of handing back a direct googlevideo URL.
+  //
+  // This is what makes playback work at all. Direct URLs are refused with 403
+  // for a large share of uploads — every auto-generated "- Topic" upload, which
+  // is most of what a music search returns — because the upstream only honours
+  // them for the session that extracted them. Proxied through the instance, the
+  // same track returns 206 and plays. Audio still travels browser -> instance,
+  // never through this deployment.
+  const { body: video, origin } = await requestProvider<InvidiousVideoResponse>(
+    `/api/v1/videos/${encodeURIComponent(videoId)}?local=true`,
     "invidious",
   );
+
+  /** Instances may return proxy URLs relative to their own origin. */
+  const absolute = (url: string) => (url.startsWith("http") ? url : `${origin}${url.startsWith("/") ? "" : "/"}${url}`);
 
   const hlsUrl = video.hlsUrl;
   if (hlsUrl) {
     return {
       trackId: `youtube:${videoId}`,
-      url: hlsUrl,
+      url: absolute(hlsUrl),
       mimeType: "application/vnd.apple.mpegurl",
       isHls: true,
       isLive: Boolean(video.liveNow),
@@ -527,7 +551,7 @@ export async function getAudioStream(videoId: string): Promise<AudioStream> {
 
   return {
     trackId: `youtube:${videoId}`,
-    url: selected.url,
+    url: absolute(selected.url),
     mimeType: selected.mimeType ?? "audio/mp4",
     codec: selected.audioQuality,
     bitrate: selected.bitrate,

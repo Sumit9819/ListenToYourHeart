@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 import { getAudioStream } from "@/lib/providers/piped";
 
 export const runtime = "nodejs";
+/**
+ * Resolution can chain several instances before one answers, and the instance
+ * that serves streams is noticeably slower from datacenter IPs than from a
+ * home connection. The platform default is too tight for that worst case.
+ */
+export const maxDuration = 30;
 
 type RouteContext = { params: Promise<{ videoId: string }> };
 
