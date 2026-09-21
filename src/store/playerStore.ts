@@ -40,6 +40,8 @@ type PlayerActions = {
   /** Switches audio/video without losing the current position. */
   setPlaybackMode: (mode: PlaybackMode) => void;
   togglePlaybackMode: () => void;
+  /** Finds the artist's real upload when the track is a still-image Art Track. */
+  resolveMusicVideo: () => Promise<void>;
   togglePictureInPicture: () => void;
   /** Minutes from now, or null to cancel. */
   setSleepTimer: (minutes: number | null) => void;
@@ -80,8 +82,12 @@ export const usePlayerStore = create<PlayerStore>()(
           isLoading: true,
           error: null,
         });
-        void audioEngine.load(track.sourceId, { mode: get().playbackMode });
+        // A new track invalidates any music video resolved for the previous one.
+        set({ videoSourceId: null });
+        const mode = get().playbackMode;
+        void audioEngine.load(track.sourceId, { mode });
         void recordPlay(track);
+        if (mode === "video") void get().resolveMusicVideo();
       };
 
       /** Consecutive failed loads; reset as soon as anything plays. */
@@ -112,6 +118,8 @@ export const usePlayerStore = create<PlayerStore>()(
         queueOrigin: null,
         playbackMode: "audio",
         hasVideo: false,
+        videoSourceId: null,
+        isResolvingVideo: false,
         sleepTimerEndsAt: null,
 
         playQueue: (tracks, start = 0, origin) => {
@@ -291,7 +299,47 @@ export const usePlayerStore = create<PlayerStore>()(
           const resumeAt = audioEngine.getCurrentTime();
           const wasPlaying = state.isPlaying;
           set({ isLoading: true, error: null });
-          void audioEngine.load(track.sourceId, { mode, startAt: resumeAt, autoplay: wasPlaying });
+
+          const sourceId = mode === "video" ? (state.videoSourceId ?? track.sourceId) : track.sourceId;
+          void audioEngine.load(sourceId, { mode, startAt: resumeAt, autoplay: wasPlaying });
+
+          if (mode === "video") void get().resolveMusicVideo();
+        },
+
+        /**
+         * Swaps in the artist's real upload when the playing track is an Art
+         * Track (a "- Topic" upload: one still image plus audio).
+         */
+        resolveMusicVideo: async () => {
+          const state = get();
+          const track = state.queue[state.currentIndex];
+          if (!track || state.videoSourceId || state.isResolvingVideo) return;
+          // Anything else is already a normal upload with real footage.
+          if (!/-\s*Topic$/i.test(track.artist)) return;
+
+          set({ isResolvingVideo: true });
+          try {
+            const params = new URLSearchParams({ artist: track.artist, title: track.title });
+            if (track.durationSeconds) params.set("duration", String(track.durationSeconds));
+            const response = await fetch(`/api/music-video?${params}`);
+            const { track: match } = (await response.json()) as { track: Track | null };
+
+            // Bail if the listener moved on while we were searching.
+            const now = get();
+            if (!match || now.playbackMode !== "video" || now.queue[now.currentIndex]?.id !== track.id) return;
+
+            set({ videoSourceId: match.sourceId });
+            void audioEngine.load(match.sourceId, {
+              mode: "video",
+              startAt: audioEngine.getCurrentTime(),
+              autoplay: now.isPlaying,
+            });
+            useUiStore.getState().pushToast(`Found the music video for "${track.title}"`, "success");
+          } catch {
+            // Keeping the still image is a fine outcome.
+          } finally {
+            set({ isResolvingVideo: false });
+          }
         },
 
         togglePlaybackMode: () => get().setPlaybackMode(get().playbackMode === "audio" ? "video" : "audio"),

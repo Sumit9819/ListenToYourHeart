@@ -10,7 +10,9 @@ Tailwind CSS 4.
 
 **Playback**
 
-- Audio-only or video mode, switchable mid-song without losing your place
+- Music / Video switch, changeable mid-song without losing your place
+- Video mode finds the artist's real music video, not the still-image Art Track
+- Watch layout: video beside the queue, so the queue stays reachable
 - Picture-in-picture and a dockable video stage that follows you between pages
 - Sleep timer with a live countdown
 - Gapless queue with working shuffle and repeat (off / all / one)
@@ -88,6 +90,12 @@ Video is served as a 360p muxed rendition. Higher resolutions exist only as
 adaptive video-only tracks, which would need Media Source Extensions to be
 stitched to a separate audio stream — more machinery than a music player
 warrants.
+
+A music search mostly returns YouTube Art Tracks: the auto-generated
+"<artist> - Topic" uploads, which are a single still image plus audio (their
+"1080p" track runs at roughly 90 kbps, against ~9,800 kbps for a real video).
+They are ideal for listening and useless for watching, so video mode looks up
+the artist's actual upload and switches to it, keeping your position.
 
 ## Scripts
 

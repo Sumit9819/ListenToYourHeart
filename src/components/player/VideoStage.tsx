@@ -29,18 +29,28 @@ export function VideoStage() {
     host.appendChild(element);
   }, []);
 
+  const isQueueOpen = useUiStore((state) => state.isQueueOpen);
   const showStage = playbackMode === "video" && hasVideo && currentIndex >= 0;
 
   return (
     <div
       aria-hidden={!showStage}
+      style={
+        // In the watch layout the stage tracks the slot the sheet reserves, so
+        // the two stay aligned at any window size without hard-coded offsets.
+        showStage && isNowPlayingOpen
+          ? { left: "max(1rem, calc(50% - 45rem))", right: undefined }
+          : undefined
+      }
       className={
         showStage
           ? isNowPlayingOpen
-            ? // Centred over the now-playing sheet's artwork slot.
-              "pointer-events-auto fixed left-1/2 top-1/2 z-70 aspect-video w-[min(92vw,56rem)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl bg-black shadow-2xl"
-            : // Docked above the player bar, out of the way but still watchable.
-              "pointer-events-auto fixed bottom-32 right-4 z-50 aspect-video w-56 overflow-hidden rounded-xl border border-line bg-black shadow-2xl sm:bottom-24 sm:w-72"
+            ? // Watch layout: fills the reserved box beside the queue column.
+              "pointer-events-auto fixed top-[4.5rem] z-70 aspect-video w-[min(calc(100vw-2rem),56rem)] overflow-hidden rounded-xl bg-black shadow-2xl lg:w-[min(calc(100vw-27rem),56rem)]"
+            : // Docked while browsing; shifts clear of the queue panel.
+              `pointer-events-auto fixed bottom-32 z-50 aspect-video w-48 overflow-hidden rounded-xl border border-line bg-black shadow-2xl sm:bottom-24 sm:w-64 ${
+                isQueueOpen ? "right-4 xl:right-[25rem]" : "right-4"
+              }`
           : // Never unmounted — parked offscreen so playback is uninterrupted.
             "pointer-events-none fixed h-px w-px overflow-hidden opacity-0 -left-[9999px] top-0"
       }

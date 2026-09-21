@@ -118,6 +118,14 @@ const DEFAULT_INVIDIOUS = [
 ];
 
 const requestTimeoutMs = 8_000;
+/**
+ * Stream resolution gets longer than search.
+ *
+ * The instance has to extract the media server-side before answering, and it is
+ * measurably slower from datacenter IPs than from a home connection — so the
+ * search timeout is tight enough to abandon a request that would have worked.
+ */
+const streamTimeoutMs = 15_000;
 
 /**
  * Upper bound for a result on the "Songs" tab.
@@ -177,16 +185,27 @@ interface ProviderResponse<T> {
   origin: string;
 }
 
-async function requestProvider<T>(path: string, kind: ProviderKind): Promise<ProviderResponse<T>> {
-  const providers = getConfiguredProviders().filter((provider) => provider.kind === kind);
+async function requestProvider<T>(
+  path: string,
+  kind: ProviderKind,
+  { timeoutMs = requestTimeoutMs }: { timeoutMs?: number } = {},
+): Promise<ProviderResponse<T>> {
+  const all = getConfiguredProviders().filter((provider) => provider.kind === kind);
+  const available = all.filter((provider) => (failedUntil.get(`${provider.kind}:${provider.origin}`) ?? 0) <= Date.now());
+
+  // If every instance is inside its cooldown, try them anyway. The breaker is
+  // meant to shed load from a flaky instance onto a healthy sibling; when there
+  // is no sibling left it would otherwise guarantee the failure it is meant to
+  // avoid. This is the difference between "slow" and "broken" when only one
+  // instance in the list actually works.
+  const providers = available.length > 0 ? available : all;
   let lastError: unknown;
 
   for (const provider of providers) {
     const key = `${provider.kind}:${provider.origin}`;
-    if ((failedUntil.get(key) ?? 0) > Date.now()) continue;
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(`${provider.origin}${path}`, {
@@ -364,6 +383,63 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
   return [];
 }
 
+/**
+ * Finds the real music video for a track.
+ *
+ * A music search mostly returns YouTube Art Tracks — the auto-generated
+ * "<artist> - Topic" uploads, which are one still image plus audio. They are
+ * ideal for listening and useless for watching, so video mode looks up the
+ * artist's actual upload instead.
+ *
+ * Returns null when nothing convincing is found; the caller then keeps playing
+ * what it already had rather than substituting something wrong.
+ */
+export async function findMusicVideo(
+  artist: string,
+  title: string,
+  durationSeconds?: number,
+): Promise<Track | null> {
+  const cleanArtist = artist.replace(/\s*-\s*Topic\s*$/i, "").trim();
+  const candidates = await searchTracks(`${cleanArtist} ${title}`, "videos");
+
+  const scored = candidates
+    .filter((track) => !/-\s*Topic$/i.test(track.artist))
+    // A compilation is never the video for one song.
+    .filter((track) => (track.durationSeconds ?? 0) <= MAX_SONG_SECONDS)
+    .map((track) => {
+      let score = 0;
+      const haystack = track.title.toLowerCase();
+
+      // Duration is the strongest signal that this is the same recording.
+      if (durationSeconds && track.durationSeconds) {
+        const drift = Math.abs(track.durationSeconds - durationSeconds);
+        if (drift <= 3) score += 50;
+        else if (drift <= 10) score += 35;
+        else if (drift <= 25) score += 15;
+        else score -= 25;
+      }
+
+      if (track.artist.toLowerCase() === cleanArtist.toLowerCase()) score += 30;
+      else if (track.artist.toLowerCase().includes(cleanArtist.toLowerCase())) score += 15;
+
+      if (/official\s*(music\s*)?video/.test(haystack)) score += 25;
+      if (haystack.includes(title.toLowerCase())) score += 10;
+
+      // These are re-uploads or the wrong recording, not the video.
+      if (/(lyrics?|lyric video|official audio|audio only)/.test(haystack)) score -= 30;
+      if (/(cover|remix|karaoke|instrumental|reaction|tutorial|8d|slowed|sped up)/.test(haystack)) score -= 40;
+      if (/(live|concert|tour)/.test(haystack) && !/live/i.test(title)) score -= 20;
+
+      return { track, score };
+    })
+    .sort((left, right) => right.score - left.score);
+
+  const best = scored[0];
+  // Below this the match is a guess, and playing the wrong song is worse than
+  // leaving the still image in place.
+  return best && best.score >= 30 ? best.track : null;
+}
+
 export interface InstanceHealth {
   origin: string;
   kind: ProviderKind;
@@ -498,13 +574,27 @@ function selectMuxedStream(streams: InvidiousFormatStream[]): InvidiousFormatStr
 export async function getAudioStream(videoId: string, mode: PlaybackMode = "audio"): Promise<AudioStream> {
   if (!/^[\w-]{6,}$/.test(videoId)) throw new Error("Invalid video ID");
 
-  // Video goes straight to Invidious: only its local=true proxy reliably
-  // returns a playable muxed rendition.
+  // Invidious is tried first, for both modes.
+  //
+  // Piped hands back direct upstream URLs, which are refused with 403 for most
+  // uploads, and its /streams endpoint has been answering HTTP 500 besides — so
+  // leading with it spent seconds on a guaranteed failure before reaching the
+  // provider that works. It stays on as a fallback in case that changes.
   try {
-    if (mode === "video") throw new Error("video mode prefers Invidious");
+    return await getInvidiousStream(videoId, mode);
+  } catch (invidiousError) {
+    console.warn(
+      `Invidious stream resolution failed for ${videoId}:`,
+      invidiousError instanceof Error ? invidiousError.message : invidiousError,
+    );
+  }
+
+  try {
+    if (mode === "video") throw new Error("Piped cannot supply a muxed rendition");
     const { body: response } = await requestProvider<PipedStreamResponse>(
       `/streams/${encodeURIComponent(videoId)}`,
       "piped",
+      { timeoutMs: streamTimeoutMs },
     );
 
     const hlsUrl = response.hls;
@@ -539,9 +629,13 @@ export async function getAudioStream(videoId: string, mode: PlaybackMode = "audi
       };
     }
   } catch {
-    // Fall through to Invidious.
+    // Both providers are exhausted.
   }
 
+  throw new Error("No provider instance could resolve a stream for this track");
+}
+
+async function getInvidiousStream(videoId: string, mode: PlaybackMode): Promise<AudioStream> {
   // `local=true` asks the instance to serve the media from its own domain
   // instead of handing back a direct googlevideo URL.
   //

@@ -69,6 +69,9 @@ export interface PlayerState {
   error: string | null;
   queueOrigin: string | null;
   playbackMode: PlaybackMode;
+  /** Real music video substituted for an Art Track, when one was found. */
+  videoSourceId: string | null;
+  isResolvingVideo: boolean;
   /** True once a video rendition is actually loaded and has dimensions. */
   hasVideo: boolean;
   /** Epoch ms at which playback should stop, or null when no timer is set. */
