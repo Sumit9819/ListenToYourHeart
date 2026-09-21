@@ -24,6 +24,8 @@ export const SHORTCUTS: ShortcutHelp[] = [
   { keys: ["F"], description: "Add the current track to favorites" },
   { keys: ["Q"], description: "Toggle the queue" },
   { keys: ["N"], description: "Open the now playing view" },
+  { keys: ["V"], description: "Switch between video and audio only" },
+  { keys: ["P"], description: "Picture in picture (video mode)" },
   { keys: ["/"], description: "Focus the search field" },
   { keys: ["?"], description: "Show this list" },
 ];
@@ -100,6 +102,16 @@ export function useKeyboardShortcuts() {
           break;
         case key === "n":
           if (player.currentIndex >= 0) ui.setNowPlayingOpen(true);
+          break;
+        case key === "v":
+          player.togglePlaybackMode();
+          ui.pushToast(
+            usePlayerStore.getState().playbackMode === "video" ? "Video mode" : "Audio only",
+            "success",
+          );
+          break;
+        case key === "p":
+          player.togglePictureInPicture();
           break;
         case event.key === "?":
           ui.setShortcutsOpen(true);

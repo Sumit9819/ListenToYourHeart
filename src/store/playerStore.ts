@@ -5,7 +5,7 @@ import { persist } from "zustand/middleware";
 import { audioEngine } from "@/lib/audio/engine";
 import { recordPlay } from "@/lib/db/library";
 import { useUiStore } from "@/store/uiStore";
-import type { PlayerState, RepeatMode, Track } from "@/types/music";
+import type { PlaybackMode, PlayerState, RepeatMode, Track } from "@/types/music";
 
 /**
  * How many tracks in a row may fail before playback stops.
@@ -37,6 +37,12 @@ type PlayerActions = {
   seek: (seconds: number) => void;
   nudge: (deltaSeconds: number) => void;
   dismissError: () => void;
+  /** Switches audio/video without losing the current position. */
+  setPlaybackMode: (mode: PlaybackMode) => void;
+  togglePlaybackMode: () => void;
+  togglePictureInPicture: () => void;
+  /** Minutes from now, or null to cancel. */
+  setSleepTimer: (minutes: number | null) => void;
   /** Wires engine events into the store. Called once by the app shell. */
   attachEngine: () => () => void;
   hydrateFromStorage: () => void;
@@ -74,12 +80,14 @@ export const usePlayerStore = create<PlayerStore>()(
           isLoading: true,
           error: null,
         });
-        void audioEngine.load(track.sourceId);
+        void audioEngine.load(track.sourceId, { mode: get().playbackMode });
         void recordPlay(track);
       };
 
       /** Consecutive failed loads; reset as soon as anything plays. */
       let consecutiveFailures = 0;
+      /** Handle for the sleep timer, so a new one replaces the old. */
+      let sleepTimeout: number | null = null;
 
       /** Position of currentIndex within the active play order. */
       const orderPosition = () => {
@@ -102,6 +110,9 @@ export const usePlayerStore = create<PlayerStore>()(
         bufferedTo: 0,
         error: null,
         queueOrigin: null,
+        playbackMode: "audio",
+        hasVideo: false,
+        sleepTimerEndsAt: null,
 
         playQueue: (tracks, start = 0, origin) => {
           if (!tracks.length) return;
@@ -267,9 +278,49 @@ export const usePlayerStore = create<PlayerStore>()(
 
         dismissError: () => set({ error: null }),
 
+        setPlaybackMode: (mode) => {
+          const state = get();
+          if (state.playbackMode === mode) return;
+          set({ playbackMode: mode });
+
+          const track = state.queue[state.currentIndex];
+          if (!track) return;
+
+          // Reload the other rendition from the same spot, so toggling mid-song
+          // does not restart the track.
+          const resumeAt = audioEngine.getCurrentTime();
+          const wasPlaying = state.isPlaying;
+          set({ isLoading: true, error: null });
+          void audioEngine.load(track.sourceId, { mode, startAt: resumeAt, autoplay: wasPlaying });
+        },
+
+        togglePlaybackMode: () => get().setPlaybackMode(get().playbackMode === "audio" ? "video" : "audio"),
+
+        togglePictureInPicture: () => void audioEngine.togglePictureInPicture(),
+
+        setSleepTimer: (minutes) => {
+          if (sleepTimeout !== null) {
+            clearTimeout(sleepTimeout);
+            sleepTimeout = null;
+          }
+          if (minutes === null) return set({ sleepTimerEndsAt: null });
+
+          const endsAt = Date.now() + minutes * 60_000;
+          sleepTimeout = setTimeout(() => {
+            audioEngine.pause();
+            sleepTimeout = null;
+            set({ sleepTimerEndsAt: null });
+            useUiStore.getState().pushToast("Sleep timer ended playback", "info");
+          }, minutes * 60_000) as unknown as number;
+          set({ sleepTimerEndsAt: endsAt });
+        },
+
         attachEngine: () =>
           audioEngine.subscribe((event) => {
             switch (event.type) {
+              case "videoavailable":
+                set({ hasVideo: event.hasVideo });
+                break;
               case "time":
                 set((state) => ({ currentTime: event.currentTime, bufferedTo: event.buffered || state.bufferedTo }));
                 break;
@@ -334,6 +385,7 @@ export const usePlayerStore = create<PlayerStore>()(
       partialize: (state) => ({
         volume: state.volume,
         isMuted: state.isMuted,
+        playbackMode: state.playbackMode,
         repeatMode: state.repeatMode,
         isShuffled: state.isShuffled,
         queue: state.queue,

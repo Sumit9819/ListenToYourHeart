@@ -4,6 +4,7 @@ import { useEffect, type ReactNode } from "react";
 import { NowPlayingSheet } from "@/components/player/NowPlayingSheet";
 import { PlayerBar } from "@/components/player/PlayerBar";
 import { QueuePanel } from "@/components/player/QueuePanel";
+import { VideoStage } from "@/components/player/VideoStage";
 import { MobileNav } from "@/components/shell/MobileNav";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
@@ -45,6 +46,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </div>
 
       <PlayerBar />
+      <VideoStage />
       <QueuePanel />
       <MobileNav />
       <NowPlayingSheet />

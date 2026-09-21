@@ -4,6 +4,9 @@ import {
   ChevronUp,
   Heart,
   ListMusic,
+  Music2,
+  PictureInPicture2,
+  Video,
   Loader2,
   Pause,
   Play,
@@ -18,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { SeekBar } from "@/components/player/SeekBar";
+import { SleepTimer } from "@/components/player/SleepTimer";
 import { Artwork } from "@/components/ui/Artwork";
 import { useLikedIds } from "@/hooks/useLibrary";
 import { toggleLike } from "@/lib/db/library";
@@ -68,6 +72,10 @@ export function PlayerBar() {
   const repeatMode = usePlayerStore((state) => state.repeatMode);
   const error = usePlayerStore((state) => state.error);
   const queueLength = usePlayerStore((state) => state.queue.length);
+  const playbackMode = usePlayerStore((state) => state.playbackMode);
+  const hasVideo = usePlayerStore((state) => state.hasVideo);
+  const togglePlaybackMode = usePlayerStore((state) => state.togglePlaybackMode);
+  const togglePictureInPicture = usePlayerStore((state) => state.togglePictureInPicture);
   const { togglePlay, next, previous, toggleShuffle, cycleRepeat, dismissError } = usePlayerStore.getState();
 
   const toggleQueue = useUiStore((state) => state.toggleQueue);
@@ -136,6 +144,17 @@ export function PlayerBar() {
           <Heart size={18} fill={isLiked ? "currentColor" : "none"} />
         </button>
 
+        <button
+          onClick={togglePlaybackMode}
+          aria-label={playbackMode === "audio" ? "Switch to video" : "Switch to audio only"}
+          aria-pressed={playbackMode === "video"}
+          className={`shrink-0 rounded-full p-2 transition sm:hidden ${
+            playbackMode === "video" ? "text-accent" : "text-ink-muted"
+          }`}
+        >
+          {playbackMode === "video" ? <Video size={18} /> : <Music2 size={18} />}
+        </button>
+
         <div className="flex shrink-0 flex-col items-center gap-1 sm:flex-1">
           <div className="flex items-center gap-1 sm:gap-2">
             <button
@@ -196,7 +215,33 @@ export function PlayerBar() {
           </div>
         </div>
 
-        <div className="hidden shrink-0 items-center gap-1 sm:flex sm:w-64 sm:justify-end lg:w-72">
+        <div className="hidden shrink-0 items-center gap-1 sm:flex sm:w-72 sm:justify-end lg:w-80">
+          <button
+            onClick={() => {
+              togglePlaybackMode();
+              pushToast(playbackMode === "audio" ? "Switched to video" : "Switched to audio only", "success");
+            }}
+            aria-label={playbackMode === "audio" ? "Switch to video" : "Switch to audio only"}
+            aria-pressed={playbackMode === "video"}
+            title={playbackMode === "audio" ? "Watch the video" : "Audio only"}
+            className={`rounded-full p-2 transition ${
+              playbackMode === "video" ? "text-accent" : "text-ink-muted hover:text-ink"
+            }`}
+          >
+            {playbackMode === "video" ? <Video size={18} /> : <Music2 size={18} />}
+          </button>
+
+          {playbackMode === "video" && hasVideo && (
+            <button
+              onClick={togglePictureInPicture}
+              aria-label="Picture in picture"
+              className="rounded-full p-2 text-ink-muted transition hover:text-ink"
+            >
+              <PictureInPicture2 size={18} />
+            </button>
+          )}
+
+          <SleepTimer />
           <VolumeControl />
           <button
             onClick={toggleQueue}

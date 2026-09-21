@@ -1,6 +1,7 @@
 "use client";
 
 import type Hls from "hls.js";
+import type { PlaybackMode } from "@/types/music";
 
 export type EngineEvent =
   | { type: "time"; currentTime: number; buffered: number }
@@ -9,7 +10,9 @@ export type EngineEvent =
   | { type: "paused" }
   | { type: "waiting" }
   | { type: "ended" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+  /** Fires once a rendition's dimensions are known, so the UI can show a stage. */
+  | { type: "videoavailable"; hasVideo: boolean };
 
 type Listener = (event: EngineEvent) => void;
 
@@ -22,18 +25,28 @@ type Listener = (event: EngineEvent) => void;
  * to events, and every command (play/seek/load) is an explicit method call.
  */
 class AudioEngine {
-  private element: HTMLAudioElement | null = null;
+  /**
+   * A <video> element, even in audio mode.
+   *
+   * <video> plays audio-only sources exactly as <audio> does, so using one
+   * element for both modes means switching between them never has to tear down
+   * and rebuild the player — which would drop the buffer and the position.
+   */
+  private element: HTMLVideoElement | null = null;
   private hls: Hls | null = null;
   private listeners = new Set<Listener>();
   /** Guards against a slow stream resolution landing after the user moved on. */
   private loadToken = 0;
   private currentSourceId: string | null = null;
 
-  private ensureElement(): HTMLAudioElement {
+  private ensureElement(): HTMLVideoElement {
     if (this.element) return this.element;
 
-    const element = new Audio();
+    const element = document.createElement("video");
     element.preload = "metadata";
+    // Without this, iOS Safari hijacks playback into its native fullscreen player.
+    element.playsInline = true;
+    element.setAttribute("playsinline", "");
     // crossOrigin is deliberately unset. It is only needed to read raw samples
     // (Web Audio analysis), which this player never does, and setting it makes
     // the browser *require* CORS headers on the stream. Leaving it off keeps
@@ -54,6 +67,9 @@ class AudioEngine {
     element.addEventListener("pause", () => this.emit({ type: "paused" }));
     element.addEventListener("waiting", () => this.emit({ type: "waiting" }));
     element.addEventListener("ended", () => this.emit({ type: "ended" }));
+    element.addEventListener("loadedmetadata", () => {
+      this.emit({ type: "videoavailable", hasVideo: element.videoWidth > 0 });
+    });
     element.addEventListener("error", () => {
       if (!element.src && !this.hls) return;
       this.emit({ type: "error", message: "This track could not be played." });
@@ -78,17 +94,23 @@ class AudioEngine {
   }
 
   /** Resolves a stream URL for `sourceId` and starts playback. */
-  async load(sourceId: string, { autoplay = true }: { autoplay?: boolean } = {}): Promise<void> {
+  async load(
+    sourceId: string,
+    { autoplay = true, mode = "audio", startAt = 0 }: { autoplay?: boolean; mode?: PlaybackMode; startAt?: number } = {},
+  ): Promise<void> {
     const element = this.ensureElement();
     const token = ++this.loadToken;
     this.currentSourceId = sourceId;
 
     this.emit({ type: "waiting" });
 
-    let stream: { url: string; isHls: boolean };
+    let stream: { url: string; isHls: boolean; kind?: PlaybackMode };
     try {
-      const response = await fetch(`/api/streams/${encodeURIComponent(sourceId)}`);
-      const body = (await response.json()) as { stream?: { url: string; isHls: boolean }; error?: string };
+      const response = await fetch(`/api/streams/${encodeURIComponent(sourceId)}?mode=${mode}`);
+      const body = (await response.json()) as {
+        stream?: { url: string; isHls: boolean; kind?: PlaybackMode };
+        error?: string;
+      };
       if (!response.ok || !body.stream) throw new Error(body.error ?? "No playable stream was found.");
       stream = body.stream;
     } catch (error) {
@@ -123,7 +145,38 @@ class AudioEngine {
       element.load();
     }
 
+    // Preserves position when only the rendition changed, e.g. audio -> video.
+    if (startAt > 0) {
+      const seekOnce = () => {
+        element.currentTime = startAt;
+        element.removeEventListener("loadedmetadata", seekOnce);
+      };
+      element.addEventListener("loadedmetadata", seekOnce);
+    }
+
     if (autoplay) await this.play();
+  }
+
+  /** Hands the media element to the component that renders the video stage. */
+  getElement(): HTMLVideoElement {
+    return this.ensureElement();
+  }
+
+  hasVideoTrack(): boolean {
+    return (this.element?.videoWidth ?? 0) > 0;
+  }
+
+  /** Browser picture-in-picture. Returns false when unavailable or refused. */
+  async togglePictureInPicture(): Promise<boolean> {
+    const element = this.element;
+    if (!element || !document.pictureInPictureEnabled) return false;
+    try {
+      if (document.pictureInPictureElement) await document.exitPictureInPicture();
+      else await element.requestPictureInPicture();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async play(): Promise<void> {

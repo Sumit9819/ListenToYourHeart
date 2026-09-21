@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { AudioStream, SearchFilter, Track } from "@/types/music";
+import type { AudioStream, PlaybackMode, SearchFilter, Track } from "@/types/music";
 
 type ProviderKind = "piped" | "invidious";
 
@@ -62,8 +62,19 @@ type InvidiousSearchItem = {
   type?: string;
 };
 
+type InvidiousFormatStream = {
+  url?: string;
+  itag?: string | number;
+  mimeType?: string;
+  type?: string;
+  quality?: string;
+  qualityLabel?: string;
+  bitrate?: number | string;
+};
+
 type InvidiousVideoResponse = {
   videoId?: string;
+  formatStreams?: InvidiousFormatStream[];
   title?: string;
   author?: string;
   lengthSeconds?: number;
@@ -471,10 +482,26 @@ export async function getSuggestions(query: string): Promise<string[]> {
   }
 }
 
-export async function getAudioStream(videoId: string): Promise<AudioStream> {
+/**
+ * Picks the muxed (video+audio) rendition for video playback.
+ *
+ * Only muxed formats are usable here. Adaptive video renditions carry no audio
+ * and would need Media Source Extensions to be stitched to a separate audio
+ * track — far more machinery than a 360p music video warrants.
+ */
+function selectMuxedStream(streams: InvidiousFormatStream[]): InvidiousFormatStream | undefined {
+  return streams
+    .filter((stream) => Boolean(stream.url) && /video/i.test(`${stream.type ?? ""}${stream.mimeType ?? ""}`))
+    .sort((left, right) => Number(right.bitrate ?? 0) - Number(left.bitrate ?? 0))[0];
+}
+
+export async function getAudioStream(videoId: string, mode: PlaybackMode = "audio"): Promise<AudioStream> {
   if (!/^[\w-]{6,}$/.test(videoId)) throw new Error("Invalid video ID");
 
+  // Video goes straight to Invidious: only its local=true proxy reliably
+  // returns a playable muxed rendition.
   try {
+    if (mode === "video") throw new Error("video mode prefers Invidious");
     const { body: response } = await requestProvider<PipedStreamResponse>(
       `/streams/${encodeURIComponent(videoId)}`,
       "piped",
@@ -489,6 +516,7 @@ export async function getAudioStream(videoId: string): Promise<AudioStream> {
         isHls: true,
         isLive: response.isLive ?? true,
         durationSeconds: response.duration,
+        kind: mode,
       };
     }
 
@@ -507,6 +535,7 @@ export async function getAudioStream(videoId: string): Promise<AudioStream> {
         isHls: false,
         isLive: response.isLive ?? false,
         durationSeconds: response.duration,
+        kind: "audio",
       };
     }
   } catch {
@@ -530,16 +559,40 @@ export async function getAudioStream(videoId: string): Promise<AudioStream> {
   /** Instances may return proxy URLs relative to their own origin. */
   const absolute = (url: string) => (url.startsWith("http") ? url : `${origin}${url.startsWith("/") ? "" : "/"}${url}`);
 
+  const durationSeconds = typeof video.lengthSeconds === "number" ? video.lengthSeconds : undefined;
+
   const hlsUrl = video.hlsUrl;
   if (hlsUrl) {
+    // HLS carries video already, so it satisfies either mode.
     return {
       trackId: `youtube:${videoId}`,
       url: absolute(hlsUrl),
       mimeType: "application/vnd.apple.mpegurl",
       isHls: true,
       isLive: Boolean(video.liveNow),
-      durationSeconds: typeof video.lengthSeconds === "number" ? video.lengthSeconds : undefined,
+      durationSeconds,
+      kind: mode,
     };
+  }
+
+  if (mode === "video") {
+    const muxed = selectMuxedStream(video.formatStreams ?? []);
+    if (muxed?.url) {
+      return {
+        trackId: `youtube:${videoId}`,
+        url: absolute(muxed.url),
+        mimeType: muxed.mimeType ?? muxed.type ?? "video/mp4",
+        bitrate: Number(muxed.bitrate) || undefined,
+        quality: muxed.quality,
+        qualityLabel: muxed.qualityLabel ?? muxed.quality,
+        isHls: false,
+        isLive: Boolean(video.liveNow),
+        durationSeconds,
+        kind: "video",
+      };
+    }
+    // No muxed rendition: fall through to audio so playback still happens.
+    // The caller sees kind: "audio" and can tell the listener why.
   }
 
   const audioStreams = (video.adaptiveFormats ?? [])
@@ -558,6 +611,7 @@ export async function getAudioStream(videoId: string): Promise<AudioStream> {
     quality: selected.quality,
     isHls: false,
     isLive: Boolean(video.liveNow),
-    durationSeconds: typeof video.lengthSeconds === "number" ? video.lengthSeconds : undefined,
+    durationSeconds,
+    kind: "audio",
   };
 }

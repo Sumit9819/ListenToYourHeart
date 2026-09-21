@@ -10,6 +10,9 @@ Tailwind CSS 4.
 
 **Playback**
 
+- Audio-only or video mode, switchable mid-song without losing your place
+- Picture-in-picture and a dockable video stage that follows you between pages
+- Sleep timer with a live countdown
 - Gapless queue with working shuffle and repeat (off / all / one)
 - Drag-to-reorder queue, play next, add to queue
 - Scrub bar with buffered-ahead indicator and hover time preview
@@ -63,15 +66,28 @@ Public instances are unreliable by nature, and the two halves fail
 independently:
 
 - **Search and suggestions** work well across most live instances.
-- **Stream resolution** is regularly blocked by the upstream source, which
-  rate-limits anonymous extraction from known instance IPs. When every
-  configured instance is blocked, search still returns results but pressing play
-  reports that no instance could resolve audio.
+- **Stream resolution** is the scarce capability. Of roughly 30 public instances
+  surveyed, one still extracts streams reliably, so `INVIDIOUS_INSTANCES` is the
+  setting most likely to need changing over time.
 
-If playback fails, the instances are the thing to change — not the app. Current
-lists live at [api.invidious.io/instances.json](https://api.invidious.io/instances.json)
-and in the Piped project's documentation. Self-hosting an instance is the only
-way to make playback genuinely dependable.
+Streams are requested with Invidious' `local=true`, which serves media from the
+instance's own domain. This matters more than it sounds: direct upstream URLs
+are refused with 403 for most uploads — including nearly every auto-generated
+"– Topic" upload, which is the bulk of what a music search returns — because the
+upstream only honours them for the session that extracted them. Proxied through
+the instance, the same track plays.
+
+If playback fails, check `/api/health` first: it probes every configured
+instance from wherever the app is deployed and reports per-instance status.
+Public instances often allow home IPs while throttling datacenter ranges, so a
+working local setup does not guarantee a working deployment. Current instance
+lists live at [api.invidious.io/instances.json](https://api.invidious.io/instances.json).
+Self-hosting remains the only way to make playback fully dependable.
+
+Video is served as a 360p muxed rendition. Higher resolutions exist only as
+adaptive video-only tracks, which would need Media Source Extensions to be
+stitched to a separate audio stream — more machinery than a music player
+warrants.
 
 ## Scripts
 
@@ -117,7 +133,7 @@ import elsewhere.
 src/
   app/              Routes, API handlers, error and loading boundaries
   components/
-    player/         Player bar, seek bar, queue panel, now-playing sheet
+    player/         Player bar, seek bar, queue, now-playing, video stage, sleep timer
     shell/          Sidebar, top bar, search box, mobile nav
     track/          Track rows, cards, collection headers, dialogs
     ui/             Artwork, menu, modal, toasts, skeletons, empty states
@@ -133,9 +149,12 @@ src/
 Two pieces are worth knowing about before changing things:
 
 - **`lib/audio/engine.ts`** owns the media element outside React. React effects
-  are a poor fit for `<audio>`: routing `currentTime` through state makes
+  are a poor fit for media elements: routing `currentTime` through state makes
   seeking fight `timeupdate`, and a re-run can tear down a stream mid-play. The
   store subscribes to engine events; every command is an explicit method call.
+  The element is a `<video>` even in audio mode, so switching modes never has to
+  rebuild the player. `components/player/VideoStage.tsx` adopts it once and
+  repositions it with CSS — re-parenting a playing element drops its buffer.
 - **`store/playerStore.ts`** addresses the queue by **index**, not track id, with
   a separate `order` array for shuffle. The same track can legitimately appear
   in a queue twice, which id-based lookup silently breaks.

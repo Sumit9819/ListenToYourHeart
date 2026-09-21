@@ -15,6 +15,9 @@ export interface Track {
   addedAt?: number;
 }
 
+/** Which rendition to request: audio-only, or muxed video+audio. */
+export type PlaybackMode = "audio" | "video";
+
 export interface AudioStream {
   trackId: string;
   url: string;
@@ -25,6 +28,10 @@ export interface AudioStream {
   isHls: boolean;
   isLive: boolean;
   durationSeconds?: number;
+  /** What the provider actually returned, which may differ from the request. */
+  kind: PlaybackMode;
+  /** Present for video renditions, e.g. "360p". */
+  qualityLabel?: string;
 }
 
 export interface Playlist {
@@ -61,4 +68,9 @@ export interface PlayerState {
   bufferedTo: number;
   error: string | null;
   queueOrigin: string | null;
+  playbackMode: PlaybackMode;
+  /** True once a video rendition is actually loaded and has dimensions. */
+  hasVideo: boolean;
+  /** Epoch ms at which playback should stop, or null when no timer is set. */
+  sleepTimerEndsAt: number | null;
 }

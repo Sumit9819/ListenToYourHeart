@@ -11,11 +11,12 @@ export const maxDuration = 30;
 
 type RouteContext = { params: Promise<{ videoId: string }> };
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
   const { videoId } = await context.params;
+  const mode = new URL(request.url).searchParams.get("mode") === "video" ? "video" : "audio";
 
   try {
-    const stream = await getAudioStream(videoId);
+    const stream = await getAudioStream(videoId, mode);
     return NextResponse.json(
       { stream },
       // Resolved URLs are signed and short-lived, so they must never be cached.

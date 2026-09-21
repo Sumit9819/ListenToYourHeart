@@ -11,6 +11,8 @@ import {
   Shuffle,
   SkipBack,
   SkipForward,
+  Music2,
+  Video,
 } from "lucide-react";
 import { SeekBar } from "@/components/player/SeekBar";
 import { Artwork } from "@/components/ui/Artwork";
@@ -34,6 +36,9 @@ export function NowPlayingSheet() {
   const isPlaying = usePlayerStore((state) => state.isPlaying);
   const isShuffled = usePlayerStore((state) => state.isShuffled);
   const repeatMode = usePlayerStore((state) => state.repeatMode);
+  const playbackMode = usePlayerStore((state) => state.playbackMode);
+  const hasVideo = usePlayerStore((state) => state.hasVideo);
+  const togglePlaybackMode = usePlayerStore((state) => state.togglePlaybackMode);
   const { togglePlay, next, previous, toggleShuffle, cycleRepeat } = usePlayerStore.getState();
   const likedIds = useLikedIds();
 
@@ -79,12 +84,17 @@ export function NowPlayingSheet() {
       </header>
 
       <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center gap-8 px-6 pb-10">
-        <Artwork
-          src={track.albumArtUrl}
-          className="aspect-square w-full max-w-[min(70vw,22rem)] shadow-2xl"
-          rounded="rounded-2xl"
-          priority
-        />
+        {playbackMode === "video" && hasVideo ? (
+          // VideoStage renders the element itself, positioned over this box.
+          <div className="aspect-video w-[min(92vw,56rem)] max-w-full" aria-hidden="true" />
+        ) : (
+          <Artwork
+            src={track.albumArtUrl}
+            className="aspect-square w-full max-w-[min(70vw,22rem)] shadow-2xl"
+            rounded="rounded-2xl"
+            priority
+          />
+        )}
 
         <div className="w-full max-w-md text-center">
           <h1 className="text-xl font-bold leading-snug sm:text-2xl">{cleanTrackTitle(track.title)}</h1>
@@ -135,6 +145,18 @@ export function NowPlayingSheet() {
           </button>
         </div>
 
+        <div className="flex flex-wrap items-center justify-center gap-2">
+        <button
+          onClick={togglePlaybackMode}
+          aria-pressed={playbackMode === "video"}
+          className={`flex items-center gap-2 rounded-full border border-line px-5 py-2.5 text-sm font-medium transition ${
+            playbackMode === "video" ? "border-accent/40 bg-accent/10 text-accent" : "text-ink-muted hover:text-ink"
+          }`}
+        >
+          {playbackMode === "video" ? <Video size={17} /> : <Music2 size={17} />}
+          {playbackMode === "video" ? "Video" : "Audio only"}
+        </button>
+
         <button
           onClick={async () => {
             const liked = await toggleLike(track);
@@ -148,6 +170,7 @@ export function NowPlayingSheet() {
           <Heart size={17} fill={isLiked ? "currentColor" : "none"} />
           {isLiked ? "In your favorites" : "Add to favorites"}
         </button>
+        </div>
       </div>
     </div>
   );
