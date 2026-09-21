@@ -251,17 +251,30 @@ const PIPED_FILTERS: Record<SearchFilter, string> = {
   playlists: "playlists",
 };
 
+/** Thrown when no configured instance could be reached at all. */
+export class ProvidersUnavailableError extends Error {
+  constructor(public readonly failures: string[]) {
+    super(`No provider instance could be reached: ${failures.join("; ")}`);
+    this.name = "ProvidersUnavailableError";
+  }
+}
+
 export async function searchTracks(query: string, filter: SearchFilter): Promise<Track[]> {
   const normalizedQuery = query.trim();
   if (!normalizedQuery) return [];
 
   const failures: string[] = [];
+  // "Every instance is unreachable" and "the query genuinely has no matches"
+  // are different answers and must not collapse into the same empty array —
+  // otherwise a total outage renders as a cheerful "No results".
+  let anyProviderResponded = false;
 
   try {
     const body = await requestProvider<PipedSearchResponse>(
       `/search?q=${encodeURIComponent(normalizedQuery)}&filter=${encodeURIComponent(PIPED_FILTERS[filter])}`,
       "piped",
     );
+    anyProviderResponded = true;
     const results = unwrapPipedSearch(body)
       .map(normalizePipedTrack)
       .filter((track): track is Track => track !== null);
@@ -276,6 +289,7 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
       `/api/v1/search?q=${encodeURIComponent(normalizedQuery)}&type=video`,
       "invidious",
     );
+    anyProviderResponded = true;
     const results = invidious.map(normalizeInvidiousTrack).filter((track): track is Track => track !== null);
     if (results.length > 0) return results;
     failures.push("invidious:empty");
@@ -283,8 +297,67 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
     failures.push(`invidious:${error instanceof Error ? error.message : "unknown"}`);
   }
 
-  console.warn("Search failed across all providers:", failures);
+  console.warn("Search returned nothing:", failures.join("; "));
+  if (!anyProviderResponded) throw new ProvidersUnavailableError(failures);
   return [];
+}
+
+export interface InstanceHealth {
+  origin: string;
+  kind: ProviderKind;
+  ok: boolean;
+  status: string;
+  latencyMs: number;
+}
+
+/**
+ * Probes every configured instance with a real search.
+ *
+ * The whole app rests on third-party instances that fail independently and
+ * often block datacenter IPs, so "which of these actually works from where the
+ * app is deployed" needs to be answerable without reading build logs.
+ */
+export async function checkInstances(): Promise<InstanceHealth[]> {
+  const probe = async (provider: ProviderInstance): Promise<InstanceHealth> => {
+    const path =
+      provider.kind === "piped" ? "/search?q=test&filter=music_songs" : "/api/v1/search?q=test&type=video";
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+
+    try {
+      const response = await fetch(`${provider.origin}${path}`, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      const contentType = response.headers.get("content-type") ?? "";
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!contentType.includes("json")) throw new Error(`non-JSON response (${contentType || "no content type"})`);
+
+      const body: unknown = await response.json();
+      if (body && typeof body === "object" && "error" in body) {
+        const detail = (body as { error?: unknown }).error;
+        throw new Error(typeof detail === "string" ? detail.slice(0, 120) : "provider reported an error");
+      }
+
+      return { ...provider, ok: true, status: "ok", latencyMs: Date.now() - startedAt };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown error";
+      return {
+        ...provider,
+        ok: false,
+        // An abort here is our own timeout firing, not a caller cancellation.
+        status: error instanceof Error && error.name === "AbortError" ? `timeout after ${requestTimeoutMs}ms` : message,
+        latencyMs: Date.now() - startedAt,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  return Promise.all(getConfiguredProviders().map(probe));
 }
 
 /**

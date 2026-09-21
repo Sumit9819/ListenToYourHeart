@@ -23,10 +23,15 @@ export async function GET(request: Request) {
       // Identical searches within the minute reuse the edge response.
       { headers: { "Cache-Control": "public, max-age=0, s-maxage=60, stale-while-revalidate=300" } },
     );
-  } catch {
+  } catch (error) {
+    console.warn("Search failed:", error instanceof Error ? error.message : error);
     return NextResponse.json(
-      { tracks: [], error: "Search providers are temporarily unavailable." },
-      { status: 503 },
+      {
+        tracks: [],
+        error:
+          "No search provider could be reached. Check /api/health to see which instances are failing from this deployment.",
+      },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
 }
