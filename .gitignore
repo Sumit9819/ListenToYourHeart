@@ -1,0 +1,27 @@
+# Dependencies
+/node_modules
+
+# Next.js build output
+/.next
+/out
+next-env.d.ts
+*.tsbuildinfo
+
+# Environment (never commit real instance lists or secrets)
+.env
+.env.local
+.env*.local
+
+# Vercel
+.vercel
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea
+.vscode/*
+!.vscode/extensions.json
+
+# Logs
+*.log
+npm-debug.log*
