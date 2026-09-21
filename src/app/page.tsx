@@ -2,7 +2,7 @@
 
 import { Heart, History, ListMusic, Play, Search, Shuffle, Sparkles } from "lucide-react";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { TrackCard } from "@/components/track/TrackCard";
 import { Artwork } from "@/components/ui/Artwork";
 import { CardShelfSkeleton, EmptyState } from "@/components/ui/States";
@@ -12,12 +12,30 @@ import { pluralize } from "@/lib/format";
 import { usePlayerStore } from "@/store/playerStore";
 import type { Track } from "@/types/music";
 
-function greeting(): string {
-  const hour = new Date().getHours();
+function greetingForHour(hour: number): string {
   if (hour < 5) return "Still up?";
   if (hour < 12) return "Good morning";
   if (hour < 17) return "Good afternoon";
   return "Good evening";
+}
+
+/**
+ * The server and the visitor are rarely in the same timezone, so reading the
+ * clock while rendering produced two different greetings and a hydration
+ * mismatch (React error #418). useSyncExternalStore exists for exactly this:
+ * it takes a separate server snapshot, so both renders emit the same markup and
+ * the real greeting appears on hydration.
+ */
+function useGreeting(): string {
+  return useSyncExternalStore(
+    // The greeting never changes while the page is open.
+    () => () => {},
+    // Client: the real greeting. Stable for the whole hour, so it is a valid
+    // snapshot to compare against.
+    () => greetingForHour(new Date().getHours()),
+    // Server: a neutral heading, so both renders emit the same markup.
+    () => "Welcome back",
+  );
 }
 
 /** Quick-access tiles: the three things a returning listener reaches for. */
@@ -54,6 +72,7 @@ function QuickTiles({ likedCount, historyCount }: { likedCount: number; historyC
 }
 
 export default function HomePage() {
+  const greeting = useGreeting();
   const { data: history, isLoading: historyLoading } = useHistory(24);
   const { data: liked } = useLikedTracks();
   const { data: topTracks } = useTopTracks(12);
@@ -86,7 +105,7 @@ export default function HomePage() {
     <>
       <header className="mb-8">
         <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-accent">Listen To Your Heart</p>
-        <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">{greeting()}</h1>
+        <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">{greeting}</h1>
       </header>
 
       {isNewListener ? (

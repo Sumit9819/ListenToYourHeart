@@ -41,7 +41,7 @@ type PlayerActions = {
   setPlaybackMode: (mode: PlaybackMode) => void;
   togglePlaybackMode: () => void;
   /** Finds the artist's real upload when the track is a still-image Art Track. */
-  resolveMusicVideo: () => Promise<void>;
+  resolveMusicVideo: (options?: { loadWhenDone?: boolean }) => Promise<void>;
   togglePictureInPicture: () => void;
   /** Minutes from now, or null to cancel. */
   setSleepTimer: (minutes: number | null) => void;
@@ -87,7 +87,7 @@ export const usePlayerStore = create<PlayerStore>()(
         const mode = get().playbackMode;
         void audioEngine.load(track.sourceId, { mode });
         void recordPlay(track);
-        if (mode === "video") void get().resolveMusicVideo();
+        if (mode === "video") void get().resolveMusicVideo({ loadWhenDone: true });
       };
 
       /** Consecutive failed loads; reset as soon as anything plays. */
@@ -294,52 +294,90 @@ export const usePlayerStore = create<PlayerStore>()(
           const track = state.queue[state.currentIndex];
           if (!track) return;
 
-          // Reload the other rendition from the same spot, so toggling mid-song
-          // does not restart the track.
-          const resumeAt = audioEngine.getCurrentTime();
-          const wasPlaying = state.isPlaying;
-          set({ isLoading: true, error: null });
+          if (mode === "audio") {
+            // Reload the audio rendition from the same spot, so toggling
+            // mid-song does not restart the track.
+            set({ isLoading: true, error: null });
+            void audioEngine.load(track.sourceId, {
+              mode: "audio",
+              startAt: audioEngine.getCurrentTime(),
+              autoplay: state.isPlaying,
+            });
+            return;
+          }
 
-          const sourceId = mode === "video" ? (state.videoSourceId ?? track.sourceId) : track.sourceId;
-          void audioEngine.load(sourceId, { mode, startAt: resumeAt, autoplay: wasPlaying });
+          // Opening the watch view is the point of the switch; docking a
+          // thumbnail in the corner reads as "nothing happened".
+          useUiStore.getState().setNowPlayingOpen(true);
 
-          if (mode === "video") void get().resolveMusicVideo();
+          // Find the video *before* loading anything. Loading first meant
+          // showing the Art Track's still image for however long the lookup
+          // took — which is exactly the "it only shows the thumbnail" symptom.
+          // The current audio keeps playing throughout, so the switch costs no
+          // silence, and the button reads "Finding..." while it works.
+          void get().resolveMusicVideo({ loadWhenDone: true });
         },
 
         /**
-         * Swaps in the artist's real upload when the playing track is an Art
-         * Track (a "- Topic" upload: one still image plus audio).
+         * Swaps in the artist's real upload when the playing source has no real
+         * footage — typically an Art Track, which is one still image plus audio.
+         *
+         * This deliberately runs for every track rather than sniffing for a
+         * "- Topic" artist. That check looked right and was dead code: Piped
+         * reports the Art Track's uploader as plain "Coldplay", so the suffix
+         * never appears and the swap never happened. Where the track already is
+         * the real video, the lookup returns that same id and nothing reloads.
          */
-        resolveMusicVideo: async () => {
+        resolveMusicVideo: async ({ loadWhenDone = false } = {}) => {
           const state = get();
           const track = state.queue[state.currentIndex];
-          if (!track || state.videoSourceId || state.isResolvingVideo) return;
-          // Anything else is already a normal upload with real footage.
-          if (!/-\s*Topic$/i.test(track.artist)) return;
+          if (!track || state.isResolvingVideo) return;
+
+          // Already resolved for this track; just honour the load request.
+          if (state.videoSourceId) {
+            if (loadWhenDone) {
+              set({ isLoading: true, error: null });
+              void audioEngine.load(state.videoSourceId, {
+                mode: "video",
+                startAt: audioEngine.getCurrentTime(),
+                autoplay: state.isPlaying,
+              });
+            }
+            return;
+          }
 
           set({ isResolvingVideo: true });
+
+          let resolvedId: string | null = null;
           try {
             const params = new URLSearchParams({ artist: track.artist, title: track.title });
             if (track.durationSeconds) params.set("duration", String(track.durationSeconds));
             const response = await fetch(`/api/music-video?${params}`);
             const { track: match } = (await response.json()) as { track: Track | null };
-
-            // Bail if the listener moved on while we were searching.
-            const now = get();
-            if (!match || now.playbackMode !== "video" || now.queue[now.currentIndex]?.id !== track.id) return;
-
-            set({ videoSourceId: match.sourceId });
-            void audioEngine.load(match.sourceId, {
-              mode: "video",
-              startAt: audioEngine.getCurrentTime(),
-              autoplay: now.isPlaying,
-            });
-            useUiStore.getState().pushToast(`Found the music video for "${track.title}"`, "success");
+            resolvedId = match?.sourceId ?? null;
           } catch {
-            // Keeping the still image is a fine outcome.
+            // Fall back to the track's own upload below.
           } finally {
             set({ isResolvingVideo: false });
           }
+
+          // Bail if the listener moved on while we were searching.
+          const now = get();
+          if (now.playbackMode !== "video" || now.queue[now.currentIndex]?.id !== track.id) return;
+          if (resolvedId) set({ videoSourceId: resolvedId });
+
+          // With no match, play the track's own upload rather than nothing —
+          // a still image beats a blank stage.
+          const target = resolvedId ?? track.sourceId;
+          const alreadyPlaying = audioEngine.getSourceId() === target;
+          if (!loadWhenDone && alreadyPlaying) return;
+
+          set({ isLoading: true, error: null });
+          void audioEngine.load(target, {
+            mode: "video",
+            startAt: audioEngine.getCurrentTime(),
+            autoplay: now.isPlaying,
+          });
         },
 
         togglePlaybackMode: () => get().setPlaybackMode(get().playbackMode === "audio" ? "video" : "audio"),

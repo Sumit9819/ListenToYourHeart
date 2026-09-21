@@ -10,11 +10,12 @@ Tailwind CSS 4.
 
 **Playback**
 
-- Music / Video switch, changeable mid-song without losing your place
+- A Watch button that finds the artist's real music video and opens the
+  watch layout, without interrupting what is already playing
 - Video mode finds the artist's real music video, not the still-image Art Track
 - Watch layout: video beside the queue, so the queue stays reachable
 - Picture-in-picture and a dockable video stage that follows you between pages
-- Sleep timer with a live countdown
+- Sleep timer, shuffle, repeat and picture-in-picture in the player overflow menu
 - Gapless queue with working shuffle and repeat (off / all / one)
 - Drag-to-reorder queue, play next, add to queue
 - Scrub bar with buffered-ahead indicator and hover time preview

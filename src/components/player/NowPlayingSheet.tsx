@@ -12,8 +12,9 @@ import {
   SkipBack,
   SkipForward,
 } from "lucide-react";
-import { ModeSwitch } from "@/components/player/ModeSwitch";
 import { QueueList } from "@/components/player/QueueList";
+import { VIDEO_SLOT_ID } from "@/components/player/VideoStage";
+import { WatchButton } from "@/components/player/WatchButton";
 import { SeekBar } from "@/components/player/SeekBar";
 import { Artwork } from "@/components/ui/Artwork";
 import { useLikedIds } from "@/hooks/useLibrary";
@@ -127,7 +128,7 @@ export function NowPlayingSheet() {
           <ChevronDown size={22} />
         </button>
 
-        <ModeSwitch />
+        <WatchButton />
 
         <div className="flex items-center gap-1">
           {isWatching && (
@@ -146,8 +147,8 @@ export function NowPlayingSheet() {
         // Watch layout: video beside the queue on desktop, stacked on mobile.
         <div className="relative z-10 grid min-h-0 flex-1 gap-6 overflow-y-auto px-4 py-5 sm:px-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:overflow-hidden">
           <div className="flex min-w-0 flex-col gap-4 lg:overflow-y-auto">
-            {/* VideoStage positions the media element over this box. */}
-            <div className="aspect-video w-full rounded-xl bg-black" aria-hidden="true" />
+            {/* VideoStage measures this box and pins itself to it. */}
+            <div id={VIDEO_SLOT_ID} className="aspect-video w-full rounded-xl bg-black" aria-hidden="true" />
 
             <div>
               <h1 className="text-lg font-bold leading-snug sm:text-xl">{cleanTrackTitle(track.title)}</h1>

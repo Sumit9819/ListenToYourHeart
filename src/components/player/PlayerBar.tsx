@@ -4,7 +4,6 @@ import {
   ChevronUp,
   Heart,
   ListMusic,
-  PictureInPicture2,
   Loader2,
   Pause,
   Play,
@@ -19,8 +18,8 @@ import {
   X,
 } from "lucide-react";
 import { SeekBar } from "@/components/player/SeekBar";
-import { SleepTimer } from "@/components/player/SleepTimer";
-import { ModeSwitch } from "@/components/player/ModeSwitch";
+import { PlayerOverflowMenu } from "@/components/player/PlayerOverflowMenu";
+import { WatchButton } from "@/components/player/WatchButton";
 import { Artwork } from "@/components/ui/Artwork";
 import { useLikedIds } from "@/hooks/useLibrary";
 import { toggleLike } from "@/lib/db/library";
@@ -71,9 +70,6 @@ export function PlayerBar() {
   const repeatMode = usePlayerStore((state) => state.repeatMode);
   const error = usePlayerStore((state) => state.error);
   const queueLength = usePlayerStore((state) => state.queue.length);
-  const playbackMode = usePlayerStore((state) => state.playbackMode);
-  const hasVideo = usePlayerStore((state) => state.hasVideo);
-  const togglePictureInPicture = usePlayerStore((state) => state.togglePictureInPicture);
   const { togglePlay, next, previous, toggleShuffle, cycleRepeat, dismissError } = usePlayerStore.getState();
 
   const toggleQueue = useUiStore((state) => state.toggleQueue);
@@ -143,7 +139,7 @@ export function PlayerBar() {
         </button>
 
         <div className="shrink-0 sm:hidden">
-          <ModeSwitch size="compact" />
+          <WatchButton compact />
         </div>
 
         <div className="flex shrink-0 flex-col items-center gap-1 sm:flex-1">
@@ -207,35 +203,27 @@ export function PlayerBar() {
         </div>
 
         <div className="hidden shrink-0 items-center gap-1 sm:flex sm:w-72 sm:justify-end lg:w-80">
-          <ModeSwitch size="compact" />
-
-          {playbackMode === "video" && hasVideo && (
-            <button
-              onClick={togglePictureInPicture}
-              aria-label="Picture in picture"
-              className="rounded-full p-2 text-ink-muted transition hover:text-ink"
-            >
-              <PictureInPicture2 size={18} />
-            </button>
-          )}
-
-          <SleepTimer />
+          <WatchButton />
           <VolumeControl />
           <button
             onClick={toggleQueue}
-            aria-label="Toggle the queue"
+            aria-label={`Toggle the queue, ${queueLength} tracks`}
             aria-pressed={isQueueOpen}
-            className={`relative rounded-full p-2 transition ${
+            className={`ml-1 flex items-center gap-1 rounded-full px-2 py-2 transition ${
               isQueueOpen ? "text-accent" : "text-ink-muted hover:text-ink"
             }`}
           >
             <ListMusic size={18} />
             {queueLength > 1 && (
-              <span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-bold text-accent-ink">
+              // Inline rather than a floating badge. Overlaying a counter on an
+              // 18px icon left no room, so it spilled onto the volume slider.
+              <span className="text-[11px] font-semibold tabular-nums">
                 {queueLength > 99 ? "99+" : queueLength}
               </span>
             )}
           </button>
+
+          <PlayerOverflowMenu />
         </div>
       </div>
     </footer>
