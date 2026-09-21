@@ -94,7 +94,15 @@ const DEFAULT_PIPED = [
   "https://pipedapi.ducks.party",
 ];
 
+/**
+ * Ordered by stream-resolution reliability, because that is the scarce
+ * capability: Piped handles nearly all search traffic, and Invidious is reached
+ * mainly as the stream fallback in getAudioStream. darkness.services is the one
+ * instance verified to return playable audio (2026-09-21); f5.si is kept behind
+ * it because its search still answers when Piped is down.
+ */
 const DEFAULT_INVIDIOUS = [
+  "https://invidious.darkness.services",
   "https://invidious.f5.si",
 ];
 
