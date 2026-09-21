@@ -4,7 +4,6 @@ import {
   ChevronDown,
   Heart,
   Pause,
-  PictureInPicture2,
   Play,
   Repeat,
   Repeat1,
@@ -42,7 +41,6 @@ export function NowPlayingSheet() {
   const playbackMode = usePlayerStore((state) => state.playbackMode);
   const hasVideo = usePlayerStore((state) => state.hasVideo);
   const queueLength = usePlayerStore((state) => state.queue.length);
-  const togglePictureInPicture = usePlayerStore((state) => state.togglePictureInPicture);
   const { togglePlay, next, previous, toggleShuffle, cycleRepeat } = usePlayerStore.getState();
   const likedIds = useLikedIds();
 
@@ -130,35 +128,27 @@ export function NowPlayingSheet() {
 
         <WatchButton />
 
-        <div className="flex items-center gap-1">
-          {isWatching && (
-            <button
-              onClick={togglePictureInPicture}
-              aria-label="Picture in picture"
-              className="rounded-full p-2 text-ink-muted transition hover:bg-white/10 hover:text-ink"
-            >
-              <PictureInPicture2 size={19} />
-            </button>
-          )}
-        </div>
+        {/* Picture-in-picture used to sit here. It now lives on the video's
+            own control strip, next to fullscreen, where players put it. */}
+        <div className="w-9 shrink-0" aria-hidden="true" />
       </header>
 
       {isWatching ? (
         // Watch layout: video beside the queue on desktop, stacked on mobile.
-        <div className="relative z-10 grid min-h-0 flex-1 gap-6 overflow-y-auto px-4 py-5 sm:px-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:overflow-hidden">
-          <div className="flex min-w-0 flex-col gap-4 lg:overflow-y-auto">
+        //
+        // Transport and seeking are deliberately absent here — they live on the
+        // video itself. Duplicating them below the stage is what pushed the
+        // controls off the bottom of the screen and made pausing a scroll away.
+        <div className="relative z-10 grid min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:overflow-hidden">
+          <div className="flex min-w-0 flex-col gap-3 lg:overflow-y-auto">
             {/* VideoStage measures this box and pins itself to it. */}
             <div id={VIDEO_SLOT_ID} className="aspect-video w-full rounded-xl bg-black" aria-hidden="true" />
 
-            <div>
-              <h1 className="text-lg font-bold leading-snug sm:text-xl">{cleanTrackTitle(track.title)}</h1>
-              <p className="mt-1 text-sm text-ink-muted">{cleanArtistName(track.artist)}</p>
-            </div>
-
-            <SeekBar />
-
             <div className="flex flex-wrap items-center justify-between gap-3">
-              {transport}
+              <div className="min-w-0">
+                <h1 className="truncate text-lg font-bold leading-snug sm:text-xl">{cleanTrackTitle(track.title)}</h1>
+                <p className="mt-0.5 truncate text-sm text-ink-muted">{cleanArtistName(track.artist)}</p>
+              </div>
               {favoriteButton}
             </div>
           </div>

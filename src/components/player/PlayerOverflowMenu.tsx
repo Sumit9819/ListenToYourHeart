@@ -1,11 +1,12 @@
 "use client";
 
-import { Moon, MoreHorizontal, PictureInPicture2, Repeat, Shuffle } from "lucide-react";
+import { Gauge, Moon, MoreHorizontal, PictureInPicture2, Radio, Repeat, Shuffle } from "lucide-react";
 import { Menu, type MenuItem } from "@/components/ui/Menu";
 import { usePlayerStore } from "@/store/playerStore";
 import { useUiStore } from "@/store/uiStore";
 
 const SLEEP_MINUTES = 30;
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 /**
  * Secondary player controls.
@@ -24,6 +25,10 @@ export function PlayerOverflowMenu() {
   const repeatMode = usePlayerStore((state) => state.repeatMode);
   const toggleShuffle = usePlayerStore((state) => state.toggleShuffle);
   const cycleRepeat = usePlayerStore((state) => state.cycleRepeat);
+  const autoplayRadio = usePlayerStore((state) => state.autoplayRadio);
+  const toggleAutoplayRadio = usePlayerStore((state) => state.toggleAutoplayRadio);
+  const playbackRate = usePlayerStore((state) => state.playbackRate);
+  const setPlaybackRate = usePlayerStore((state) => state.setPlaybackRate);
   const pushToast = useUiStore((state) => state.pushToast);
 
   const items: MenuItem[] = [
@@ -32,6 +37,23 @@ export function PlayerOverflowMenu() {
       icon: PictureInPicture2,
       when: playbackMode === "video" && hasVideo,
       onSelect: togglePictureInPicture,
+    },
+    {
+      label: autoplayRadio ? "Radio: on" : "Radio: off",
+      icon: Radio,
+      onSelect: () => {
+        toggleAutoplayRadio();
+        pushToast(
+          usePlayerStore.getState().autoplayRadio
+            ? "Radio on — similar tracks keep playing after the queue"
+            : "Radio off — playback stops at the end of the queue",
+        );
+      },
+    },
+    {
+      label: `Speed: ${playbackRate}x`,
+      icon: Gauge,
+      onSelect: () => setPlaybackRate(SPEEDS[(SPEEDS.indexOf(playbackRate) + 1) % SPEEDS.length] ?? 1),
     },
     {
       label: isShuffled ? "Shuffle: on" : "Shuffle: off",

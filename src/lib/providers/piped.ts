@@ -387,6 +387,19 @@ export class ProvidersUnavailableError extends Error {
   }
 }
 
+/**
+ * Records what the caller was searching for on every result.
+ *
+ * The distinction is load-bearing at playback time, not just in the UI: a
+ * "video" already has footage and must play its own upload, while a "song" is
+ * usually a still image and needs a music-video lookup before it can be watched.
+ */
+function tagKind(tracks: Track[], filter: SearchFilter): Track[] {
+  const kind = filter === "music_songs" ? "song" : filter === "videos" ? "video" : undefined;
+  if (!kind) return tracks;
+  return tracks.map((track) => ({ ...track, kind }));
+}
+
 export async function searchTracks(query: string, filter: SearchFilter): Promise<Track[]> {
   const normalizedQuery = query.trim();
   if (!normalizedQuery) return [];
@@ -407,7 +420,7 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
       .map(normalizePipedTrack)
       .filter((track): track is Track => track !== null)
       .filter((track) => isReasonableForFilter(track, filter));
-    if (results.length > 0) return results;
+    if (results.length > 0) return tagKind(results, filter);
     failures.push("piped:empty");
   } catch (error) {
     failures.push(`piped:${error instanceof Error ? error.message : "unknown"}`);
@@ -423,7 +436,7 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
       .map(normalizeInvidiousTrack)
       .filter((track): track is Track => track !== null)
       .filter((track) => isReasonableForFilter(track, filter));
-    if (results.length > 0) return results;
+    if (results.length > 0) return tagKind(results, filter);
     failures.push("invidious:empty");
   } catch (error) {
     failures.push(`invidious:${error instanceof Error ? error.message : "unknown"}`);
@@ -432,6 +445,42 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
   console.warn("Search returned nothing:", failures.join("; "));
   if (!anyProviderResponded) throw new ProvidersUnavailableError(failures);
   return [];
+}
+
+export interface SplitSearchResults {
+  songs: Track[];
+  videos: Track[];
+}
+
+/**
+ * Songs and videos for one query, fetched together.
+ *
+ * Two searches rather than one filtered list, because the provider's own
+ * "music_songs" and "videos" filters return genuinely different catalogues —
+ * the first is the audio release, the second the artist's upload. Running them
+ * concurrently costs the same wall-clock as running one, since the hedging in
+ * requestProvider already overlaps instances.
+ *
+ * Either half may legitimately be empty; only a total failure of both throws.
+ */
+export async function searchSplit(query: string): Promise<SplitSearchResults> {
+  const [songs, videos] = await Promise.allSettled([
+    searchTracks(query, "music_songs"),
+    searchTracks(query, "videos"),
+  ]);
+
+  if (songs.status === "rejected" && videos.status === "rejected") {
+    throw songs.reason instanceof Error ? songs.reason : new Error("Search failed");
+  }
+
+  const songResults = songs.status === "fulfilled" ? songs.value : [];
+  // The same upload showing up under both headings reads as a duplicate bug.
+  const songIds = new Set(songResults.map((track) => track.sourceId));
+  const videoResults = (videos.status === "fulfilled" ? videos.value : []).filter(
+    (track) => !songIds.has(track.sourceId),
+  );
+
+  return { songs: songResults, videos: videoResults };
 }
 
 /**

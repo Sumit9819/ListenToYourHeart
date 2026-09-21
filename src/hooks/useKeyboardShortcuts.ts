@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { toggleVideoFullscreen } from "@/components/player/VideoStage";
 import { toggleLike } from "@/lib/db/library";
 import { usePlayerStore } from "@/store/playerStore";
 import { useUiStore } from "@/store/uiStore";
@@ -21,7 +22,7 @@ export const SHORTCUTS: ShortcutHelp[] = [
   { keys: ["M"], description: "Mute or unmute" },
   { keys: ["S"], description: "Toggle shuffle" },
   { keys: ["R"], description: "Cycle repeat" },
-  { keys: ["F"], description: "Add the current track to favorites" },
+  { keys: ["F"], description: "Fullscreen while watching, otherwise add to favorites" },
   { keys: ["Q"], description: "Toggle the queue" },
   { keys: ["N"], description: "Open the now playing view" },
   { keys: ["V"], description: "Switch between video and audio only" },
@@ -90,6 +91,13 @@ export function useKeyboardShortcuts() {
           ui.pushToast(`Repeat: ${usePlayerStore.getState().repeatMode}`);
           break;
         case key === "f": {
+          // While something is on screen, F means what it means in every video
+          // player. Elsewhere it keeps its original meaning.
+          if (player.playbackMode === "video" && player.hasVideo) {
+            event.preventDefault();
+            void toggleVideoFullscreen();
+            break;
+          }
           const track = player.queue[player.currentIndex];
           if (!track) break;
           void toggleLike(track).then((liked) =>

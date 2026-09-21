@@ -4,30 +4,55 @@ import { ListPlus, Play, Search, SearchX, Shuffle } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { TrackList } from "@/components/track/TrackList";
+import { VideoCard } from "@/components/track/VideoCard";
 import { ErrorNotice, EmptyState, TrackRowSkeleton } from "@/components/ui/States";
-import { useRecentSearches } from "@/hooks/useLibrary";
+import { useLikedIds, useRecentSearches } from "@/hooks/useLibrary";
 import { formatTotalRuntime, pluralize } from "@/lib/format";
 import { usePlayerStore } from "@/store/playerStore";
 import { useUiStore } from "@/store/uiStore";
-import type { SearchFilter, Track } from "@/types/music";
+import type { Track } from "@/types/music";
 
-const FILTERS: Array<{ value: SearchFilter; label: string }> = [
-  { value: "music_songs", label: "Songs" },
+/** Which catalogue the page is showing. Not the provider's filter names. */
+type Tab = "all" | "songs" | "videos";
+
+const TABS: Array<{ value: Tab; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "songs", label: "Songs" },
   { value: "videos", label: "Videos" },
-  { value: "all", label: "Everything" },
 ];
 
+/** How many songs the combined tab shows before the videos start. */
+const SONGS_ON_ALL_TAB = 6;
+
 interface SearchOutcome {
-  /** The query+filter pair this outcome belongs to. */
+  /** The query+tab pair this outcome belongs to. */
   key: string;
-  tracks: Track[];
+  songs: Track[];
+  videos: Track[];
   error: string | null;
+}
+
+function VideoGrid({ tracks, origin }: { tracks: Track[]; origin: string }) {
+  const likedIds = useLikedIds();
+  return (
+    <div className="grid grid-cols-1 gap-x-4 gap-y-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {tracks.map((track, index) => (
+        <VideoCard
+          key={`${track.id}-${index}`}
+          track={track}
+          context={tracks}
+          origin={origin}
+          isLiked={likedIds.has(track.id)}
+        />
+      ))}
+    </div>
+  );
 }
 
 export function SearchResults() {
   const searchParams = useSearchParams();
   const query = searchParams.get("q") ?? "";
-  const [filter, setFilter] = useState<SearchFilter>("music_songs");
+  const [tab, setTab] = useState<Tab>("all");
   const [outcome, setOutcome] = useState<SearchOutcome | null>(null);
   /** Bumped by the retry button to force the effect to run again. */
   const [attempt, setAttempt] = useState(0);
@@ -40,7 +65,7 @@ export function SearchResults() {
   const { data: recentSearches } = useRecentSearches();
 
   const isQueryValid = query.trim().length >= 2;
-  const key = `${attempt}|${filter}|${query}`;
+  const key = `${attempt}|${tab}|${query}`;
   // Derived rather than stored: an outcome from an older key means the current
   // search is still in flight.
   const isLoading = isQueryValid && outcome?.key !== key;
@@ -49,12 +74,26 @@ export function SearchResults() {
     if (!isQueryValid) return;
     const controller = new AbortController();
 
-    fetch(`/api/search?q=${encodeURIComponent(query)}&filter=${filter}`, { signal: controller.signal })
+    // The combined tab needs both catalogues, which the route fetches
+    // concurrently; a single-type tab asks for just that one.
+    const url =
+      tab === "all"
+        ? `/api/search?q=${encodeURIComponent(query)}&split=1`
+        : `/api/search?q=${encodeURIComponent(query)}&filter=${tab === "songs" ? "music_songs" : "videos"}`;
+
+    fetch(url, { signal: controller.signal })
       .then(async (response) => {
-        const body = (await response.json()) as { tracks?: Track[]; error?: string };
+        const body = (await response.json()) as {
+          tracks?: Track[];
+          songs?: Track[];
+          videos?: Track[];
+          error?: string;
+        };
+        const flat = body.tracks ?? [];
         setOutcome({
           key,
-          tracks: body.tracks ?? [],
+          songs: body.songs ?? (tab === "songs" ? flat : []),
+          videos: body.videos ?? (tab === "videos" ? flat : []),
           error: response.ok ? null : (body.error ?? "Search is temporarily unavailable."),
         });
       })
@@ -62,13 +101,14 @@ export function SearchResults() {
         if (error.name === "AbortError") return;
         setOutcome({
           key,
-          tracks: [],
+          songs: [],
+          videos: [],
           error: "Search failed. The public provider instances may be down right now.",
         });
       });
 
     return () => controller.abort();
-  }, [key, query, filter, isQueryValid]);
+  }, [key, query, tab, isQueryValid]);
 
   if (!isQueryValid) {
     return (
@@ -100,8 +140,15 @@ export function SearchResults() {
     );
   }
 
-  const tracks = outcome?.key === key ? outcome.tracks : [];
-  const error = outcome?.key === key ? outcome.error : null;
+  const current = outcome?.key === key ? outcome : null;
+  const songs = current?.songs ?? [];
+  const videos = current?.videos ?? [];
+  const error = current?.error ?? null;
+  const origin = `Search: ${query}`;
+
+  // What the bulk actions operate on: whatever the visible tab is showing.
+  const primary = tab === "videos" ? videos : songs;
+  const total = songs.length + videos.length;
 
   return (
     <>
@@ -109,22 +156,22 @@ export function SearchResults() {
         <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
           Results for <span className="text-accent">{query}</span>
         </h1>
-        {tracks.length > 0 && (
+        {total > 0 && (
           <p className="mt-1 text-sm text-ink-muted">
-            {pluralize(tracks.length, "result")}
-            {formatTotalRuntime(tracks) && ` · ${formatTotalRuntime(tracks)}`}
+            {pluralize(total, "result")}
+            {formatTotalRuntime(primary) && ` · ${formatTotalRuntime(primary)}`}
           </p>
         )}
       </header>
 
       <div className="mb-6 flex flex-wrap items-center gap-2">
-        {FILTERS.map(({ value, label }) => (
+        {TABS.map(({ value, label }) => (
           <button
             key={value}
-            onClick={() => setFilter(value)}
-            aria-pressed={filter === value}
+            onClick={() => setTab(value)}
+            aria-pressed={tab === value}
             className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
-              filter === value
+              tab === value
                 ? "bg-ink text-surface"
                 : "border border-line bg-surface-raised text-ink-muted hover:text-ink"
             }`}
@@ -133,10 +180,10 @@ export function SearchResults() {
           </button>
         ))}
 
-        {tracks.length > 0 && (
+        {primary.length > 0 && (
           <div className="ml-auto flex gap-2">
             <button
-              onClick={() => playQueue(tracks, 0, `Search: ${query}`)}
+              onClick={() => playQueue(primary, 0, origin)}
               className="inline-flex items-center gap-2 rounded-full bg-accent px-4 py-1.5 text-sm font-semibold text-accent-ink transition hover:opacity-90"
             >
               <Play size={15} fill="currentColor" />
@@ -145,7 +192,7 @@ export function SearchResults() {
             <button
               onClick={() => {
                 if (!isShuffled) toggleShuffle();
-                playQueue(tracks, Math.floor(Math.random() * tracks.length), `Search: ${query}`);
+                playQueue(primary, Math.floor(Math.random() * primary.length), origin);
               }}
               aria-label="Shuffle these results"
               className="inline-flex items-center gap-2 rounded-full border border-line px-4 py-1.5 text-sm font-medium transition hover:bg-white/10"
@@ -155,8 +202,8 @@ export function SearchResults() {
             </button>
             <button
               onClick={() => {
-                addToQueue(tracks);
-                pushToast(`${pluralize(tracks.length, "song")} added to the queue`, "success");
+                addToQueue(primary);
+                pushToast(`${pluralize(primary.length, "song")} added to the queue`, "success");
               }}
               aria-label="Add all results to the queue"
               className="inline-flex items-center gap-2 rounded-full border border-line px-4 py-1.5 text-sm font-medium transition hover:bg-white/10"
@@ -175,15 +222,48 @@ export function SearchResults() {
       )}
 
       {isLoading ? (
-        <TrackRowSkeleton count={10} />
-      ) : tracks.length > 0 ? (
-        <TrackList tracks={tracks} origin={`Search: ${query}`} />
+        <TrackRowSkeleton count={8} />
+      ) : total > 0 ? (
+        <div className="space-y-9">
+          {songs.length > 0 && (
+            <section>
+              {tab === "all" && (
+                <div className="mb-3 flex items-baseline justify-between gap-3">
+                  <h2 className="text-lg font-bold">Songs</h2>
+                  {songs.length > SONGS_ON_ALL_TAB && (
+                    <button onClick={() => setTab("songs")} className="text-sm font-medium text-accent hover:underline">
+                      Show all {songs.length}
+                    </button>
+                  )}
+                </div>
+              )}
+              <TrackList
+                tracks={tab === "all" ? songs.slice(0, SONGS_ON_ALL_TAB) : songs}
+                origin={origin}
+              />
+            </section>
+          )}
+
+          {videos.length > 0 && (
+            <section>
+              {tab === "all" && (
+                <div className="mb-3 flex items-baseline justify-between gap-3">
+                  <h2 className="text-lg font-bold">Videos</h2>
+                  <button onClick={() => setTab("videos")} className="text-sm font-medium text-accent hover:underline">
+                    Show all {videos.length}
+                  </button>
+                </div>
+              )}
+              <VideoGrid tracks={videos} origin={origin} />
+            </section>
+          )}
+        </div>
       ) : (
         !error && (
           <EmptyState
             icon={SearchX}
             title="No results"
-            message="Nothing came back for that search. Try a different spelling, or switch the filter to Everything."
+            message="Nothing came back for that search. Try a different spelling, or switch to the All tab."
           />
         )
       )}

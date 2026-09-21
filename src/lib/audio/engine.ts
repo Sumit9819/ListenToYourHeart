@@ -12,7 +12,9 @@ export type EngineEvent =
   | { type: "ended" }
   | { type: "error"; message: string }
   /** Fires once a rendition's dimensions are known, so the UI can show a stage. */
-  | { type: "videoavailable"; hasVideo: boolean };
+  | { type: "videoavailable"; hasVideo: boolean }
+  /** A video rendition could not be resolved, but the audio one could. */
+  | { type: "videounavailable" };
 
 type Listener = (event: EngineEvent) => void;
 
@@ -106,17 +108,27 @@ class AudioEngine {
 
     let stream: { url: string; isHls: boolean; kind?: PlaybackMode };
     try {
-      const response = await fetch(`/api/streams/${encodeURIComponent(sourceId)}?mode=${mode}`);
-      const body = (await response.json()) as {
-        stream?: { url: string; isHls: boolean; kind?: PlaybackMode };
-        error?: string;
-      };
-      if (!response.ok || !body.stream) throw new Error(body.error ?? "No playable stream was found.");
-      stream = body.stream;
+      stream = await this.resolveStream(sourceId, mode);
     } catch (error) {
       if (token !== this.loadToken) return;
-      this.emit({ type: "error", message: error instanceof Error ? error.message : "Playback failed." });
-      return;
+
+      // A video rendition failing does not mean the track is unplayable.
+      // Extraction fails far more often for real music-video uploads than for
+      // audio — labels restrict them — and dropping the whole track over it
+      // means the queue skips past songs that would have played fine.
+      if (mode === "video") {
+        try {
+          stream = await this.resolveStream(sourceId, "audio");
+          if (token !== this.loadToken) return;
+          this.emit({ type: "videounavailable" });
+        } catch {
+          this.emit({ type: "error", message: "This track could not be played." });
+          return;
+        }
+      } else {
+        this.emit({ type: "error", message: error instanceof Error ? error.message : "Playback failed." });
+        return;
+      }
     }
 
     // The user skipped while we were resolving — drop this result on the floor.
@@ -155,6 +167,20 @@ class AudioEngine {
     }
 
     if (autoplay) await this.play();
+  }
+
+  /** Asks the server for a playable URL. Throws with the provider's reason. */
+  private async resolveStream(
+    sourceId: string,
+    mode: PlaybackMode,
+  ): Promise<{ url: string; isHls: boolean; kind?: PlaybackMode }> {
+    const response = await fetch(`/api/streams/${encodeURIComponent(sourceId)}?mode=${mode}`);
+    const body = (await response.json()) as {
+      stream?: { url: string; isHls: boolean; kind?: PlaybackMode };
+      error?: string;
+    };
+    if (!response.ok || !body.stream) throw new Error(body.error ?? "No playable stream was found.");
+    return body.stream;
   }
 
   /** Hands the media element to the component that renders the video stage. */
@@ -220,7 +246,11 @@ class AudioEngine {
   }
 
   setPlaybackRate(rate: number): void {
-    this.ensureElement().playbackRate = rate;
+    const element = this.ensureElement();
+    // Loading a new resource resets playbackRate to defaultPlaybackRate, so
+    // setting only the former would silently revert on the next track.
+    element.defaultPlaybackRate = rate;
+    element.playbackRate = rate;
   }
 
   stop(): void {

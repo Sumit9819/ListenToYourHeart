@@ -19,6 +19,8 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 type PlayerActions = {
   playQueue: (tracks: Track[], startIndex?: number, origin?: string) => void;
   playTrack: (track: Track, origin?: string) => void;
+  /** Plays a result that already is a video, in the watch view. */
+  watchTrack: (track: Track, context?: Track[], origin?: string) => void;
   togglePlay: () => void;
   play: () => void;
   pause: () => void;
@@ -45,6 +47,8 @@ type PlayerActions = {
   togglePictureInPicture: () => void;
   /** Minutes from now, or null to cancel. */
   setSleepTimer: (minutes: number | null) => void;
+  toggleAutoplayRadio: () => void;
+  setPlaybackRate: (rate: number) => void;
   /** Wires engine events into the store. Called once by the app shell. */
   attachEngine: () => () => void;
   hydrateFromStorage: () => void;
@@ -120,6 +124,39 @@ export const usePlayerStore = create<PlayerStore>()(
       /** Handle for the sleep timer, so a new one replaces the old. */
       let sleepTimeout: number | null = null;
 
+      /**
+       * Appends provider recommendations seeded from the playing track.
+       *
+       * Resolves to the queue index to play next, or null when nothing usable
+       * came back — a dead provider must not leave the player stuck on a
+       * spinner, so the caller stops cleanly in that case.
+       */
+      const extendWithRadio = async (): Promise<number | null> => {
+        const state = get();
+        if (state.isExtendingQueue) return null;
+        const seed = state.queue[state.currentIndex];
+        if (!seed) return null;
+
+        set({ isExtendingQueue: true });
+        try {
+          const response = await fetch(`/api/related/${encodeURIComponent(seed.sourceId)}`);
+          const { tracks } = (await response.json()) as { tracks?: Track[] };
+          // Never re-queue something already in this session's queue, or the
+          // radio loops between two tracks forever.
+          const known = new Set(get().queue.map((track) => track.id));
+          const additions = (tracks ?? []).filter((track) => !known.has(track.id)).slice(0, 10);
+          if (!additions.length) return null;
+
+          const firstIndex = get().queue.length;
+          get().addToQueue(additions);
+          return firstIndex;
+        } catch {
+          return null;
+        } finally {
+          set({ isExtendingQueue: false });
+        }
+      };
+
       /** Position of currentIndex within the active play order. */
       const orderPosition = () => {
         const { order, currentIndex } = get();
@@ -146,6 +183,9 @@ export const usePlayerStore = create<PlayerStore>()(
         videoSourceId: null,
         isResolvingVideo: false,
         sleepTimerEndsAt: null,
+        autoplayRadio: true,
+        isExtendingQueue: false,
+        playbackRate: 1,
 
         playQueue: (tracks, start = 0, origin) => {
           if (!tracks.length) return;
@@ -160,6 +200,16 @@ export const usePlayerStore = create<PlayerStore>()(
         },
 
         playTrack: (track, origin) => get().playQueue([track], 0, origin),
+
+        watchTrack: (track, context, origin) => {
+          const queue = context?.length ? context : [track];
+          const start = Math.max(0, queue.indexOf(track));
+          // Set the mode before the queue, so startIndex loads the video
+          // rendition straight away instead of loading audio and swapping.
+          set({ playbackMode: "video" });
+          useUiStore.getState().setNowPlayingOpen(true);
+          get().playQueue(queue, start, origin);
+        },
 
         togglePlay: () => {
           const { isPlaying, queue } = get();
@@ -189,6 +239,25 @@ export const usePlayerStore = create<PlayerStore>()(
 
           if (nextPosition >= order.length) {
             if (repeatMode === "all") return startIndex(order[0] ?? 0);
+
+            // Running out of queue is the most common reason listening stops,
+            // and it is rarely what anyone wanted. Radio keeps it going with
+            // tracks related to the one just finished.
+            if (get().autoplayRadio) {
+              set({ isLoading: true });
+              void extendWithRadio().then((index) => {
+                if (index === null) {
+                  audioEngine.pause();
+                  audioEngine.seek(0);
+                  set({ isPlaying: false, isLoading: false, currentTime: 0 });
+                  return;
+                }
+                useUiStore.getState().pushToast("Radio: playing similar tracks");
+                startIndex(index);
+              });
+              return;
+            }
+
             audioEngine.pause();
             audioEngine.seek(0);
             set({ isPlaying: false, currentTime: 0 });
@@ -364,11 +433,16 @@ export const usePlayerStore = create<PlayerStore>()(
           const track = state.queue[state.currentIndex];
           if (!track || state.isResolvingVideo) return;
 
-          // Already resolved for this track; just honour the load request.
-          if (state.videoSourceId) {
-            if (loadWhenDone) {
+          // Either already resolved for this track, or a search result that is
+          // itself a video — the latter needs no lookup at all. Substituting
+          // the "official video" for a live take the listener deliberately
+          // picked would be actively wrong, as well as slower.
+          const known = state.videoSourceId ?? (track.kind === "video" ? track.sourceId : null);
+          if (known) {
+            if (!state.videoSourceId) set({ videoSourceId: known });
+            if (loadWhenDone && audioEngine.getSourceId() !== known) {
               set({ isLoading: true, error: null });
-              void audioEngine.load(state.videoSourceId, {
+              void audioEngine.load(known, {
                 mode: "video",
                 startAt: audioEngine.getCurrentTime(),
                 autoplay: state.isPlaying,
@@ -415,6 +489,14 @@ export const usePlayerStore = create<PlayerStore>()(
 
         togglePictureInPicture: () => void audioEngine.togglePictureInPicture(),
 
+        toggleAutoplayRadio: () => set((state) => ({ autoplayRadio: !state.autoplayRadio })),
+
+        setPlaybackRate: (rate) => {
+          const clamped = Math.max(0.25, Math.min(rate, 2));
+          audioEngine.setPlaybackRate(clamped);
+          set({ playbackRate: clamped });
+        },
+
         setSleepTimer: (minutes) => {
           if (sleepTimeout !== null) {
             clearTimeout(sleepTimeout);
@@ -437,6 +519,15 @@ export const usePlayerStore = create<PlayerStore>()(
             switch (event.type) {
               case "videoavailable":
                 set({ hasVideo: event.hasVideo });
+                break;
+              case "videounavailable":
+                // The audio rendition is already loading, so this is a mode
+                // correction, not an error — going through setPlaybackMode
+                // would start a second load of what is already playing.
+                set({ playbackMode: "audio", videoSourceId: null, hasVideo: false });
+                useUiStore
+                  .getState()
+                  .pushToast("No video available for this track — playing the audio", "info");
                 break;
               case "time":
                 set((state) => ({ currentTime: event.currentTime, bufferedTo: event.buffered || state.bufferedTo }));
@@ -488,9 +579,10 @@ export const usePlayerStore = create<PlayerStore>()(
           }),
 
         hydrateFromStorage: () => {
-          const { volume, isMuted } = get();
+          const { volume, isMuted, playbackRate } = get();
           audioEngine.setVolume(volume);
           audioEngine.setMuted(isMuted);
+          audioEngine.setPlaybackRate(playbackRate);
         },
       };
     },
@@ -509,6 +601,8 @@ export const usePlayerStore = create<PlayerStore>()(
         order: state.order,
         currentIndex: state.currentIndex,
         queueOrigin: state.queueOrigin,
+        autoplayRadio: state.autoplayRadio,
+        playbackRate: state.playbackRate,
       }),
     },
   ),

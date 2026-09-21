@@ -13,6 +13,15 @@ export interface Track {
   durationSeconds?: number;
   isLive?: boolean;
   addedAt?: number;
+  /**
+   * What the search that produced this track was looking for.
+   *
+   * "song" is an Art Track or similar audio upload, whose only picture is a
+   * still, so watching it needs a separate music-video lookup. "video" is a real
+   * upload that already has footage, so it plays as-is and must never be
+   * swapped for something else. Undefined on tracks saved before this existed.
+   */
+  kind?: "song" | "video";
 }
 
 /** Which rendition to request: audio-only, or muxed video+audio. */
@@ -76,4 +85,10 @@ export interface PlayerState {
   hasVideo: boolean;
   /** Epoch ms at which playback should stop, or null when no timer is set. */
   sleepTimerEndsAt: number | null;
+  /** Keep playing past the end of the queue with provider recommendations. */
+  autoplayRadio: boolean;
+  /** True while recommendations for the end of the queue are being fetched. */
+  isExtendingQueue: boolean;
+  /** 1 is normal speed. */
+  playbackRate: number;
 }
