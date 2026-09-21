@@ -13,16 +13,22 @@ export async function GET() {
   const instances = await checkInstances();
   const healthy = instances.filter((instance) => instance.ok);
 
+  // "Nothing is configured" and "nothing is reachable" need different fixes,
+  // so they must never look alike here.
+  const hint =
+    instances.length === 0
+      ? "No instances are configured. PIPED_INSTANCES / INVIDIOUS_INSTANCES are set but empty, or contain no valid https origins. Remove them to use the built-in defaults."
+      : healthy.length === 0
+        ? "Every configured instance failed from this deployment. Public instances often allow home IPs while blocking datacenter ranges — see the per-instance status below."
+        : undefined;
+
   return NextResponse.json(
     {
       healthy: healthy.length,
-      total: instances.length,
+      configured: instances.length,
       searchWorks: healthy.length > 0,
       instances,
-      hint:
-        healthy.length > 0
-          ? undefined
-          : "No configured instance responded. Set PIPED_INSTANCES / INVIDIOUS_INSTANCES to instances reachable from this deployment.",
+      hint,
     },
     { status: healthy.length > 0 ? 200 : 503, headers: { "Cache-Control": "no-store" } },
   );

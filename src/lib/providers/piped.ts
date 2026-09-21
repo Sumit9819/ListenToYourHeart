@@ -102,16 +102,27 @@ const requestTimeoutMs = 8_000;
 /** Circuit breaker: an instance that just failed is skipped for 30 seconds. */
 const failedUntil = new Map<string, number>();
 
-function getConfiguredProviders(): ProviderInstance[] {
-  const piped =
-    process.env.PIPED_INSTANCES?.split(",")
-      .map((origin) => origin.trim().replace(/\/$/, ""))
-      .filter(Boolean) ?? DEFAULT_PIPED;
+/**
+ * Parses a comma-separated origin list, falling back when it yields nothing.
+ *
+ * `??` is deliberately avoided here: a variable defined as an empty string is
+ * not `undefined`, so `??` would hand back an empty list and silently disable
+ * every provider. A hosting dashboard makes empty variables very easy to
+ * create, and the symptom (search returns nothing, no error anywhere) is
+ * almost impossible to trace back to its cause.
+ */
+function parseOrigins(raw: string | undefined, fallback: string[]): string[] {
+  const parsed = (raw ?? "")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean);
 
-  const invidious =
-    process.env.INVIDIOUS_INSTANCES?.split(",")
-      .map((origin) => origin.trim().replace(/\/$/, ""))
-      .filter(Boolean) ?? DEFAULT_INVIDIOUS;
+  return parsed.length > 0 ? parsed : fallback;
+}
+
+function getConfiguredProviders(): ProviderInstance[] {
+  const piped = parseOrigins(process.env.PIPED_INSTANCES, DEFAULT_PIPED);
+  const invidious = parseOrigins(process.env.INVIDIOUS_INSTANCES, DEFAULT_INVIDIOUS);
 
   const providers: ProviderInstance[] = [
     ...piped.map((origin) => ({ origin, kind: "piped" as const })),
