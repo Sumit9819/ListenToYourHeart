@@ -53,7 +53,7 @@ and [Invidious](https://invidious.io) API instances. Configure them in `.env.loc
 
 ```bash
 PIPED_INSTANCES=https://api.piped.private.coffee,https://pipedapi.ducks.party
-INVIDIOUS_INSTANCES=https://invidious.f5.si
+INVIDIOUS_INSTANCES=https://invidious.darkness.services,https://invidious.f5.si
 ```
 
 Both are comma-separated lists of **API** origins (not web frontends — a
@@ -139,7 +139,7 @@ src/
     ui/             Artwork, menu, modal, toasts, skeletons, empty states
   hooks/            Audio controller, keyboard shortcuts, live DB queries
   lib/
-    audio/engine.ts Singleton that owns the <audio> element and hls.js
+    audio/engine.ts Singleton that owns the media element and hls.js
     db/             Dexie schema and all library reads/writes
     providers/      Provider clients, normalisation and failover
   store/            Zustand stores for the player and UI
