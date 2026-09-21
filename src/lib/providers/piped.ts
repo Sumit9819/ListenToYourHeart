@@ -112,9 +112,13 @@ const requestTimeoutMs = 8_000;
  * Upper bound for a result on the "Songs" tab.
  *
  * Provider search happily returns 90-minute concert compilations and "best of"
- * mixes alongside actual tracks. They are wrong for a music player regardless,
- * and in practice they are also the results most likely to fail extraction, so
- * dropping them improves both relevance and the odds that pressing play works.
+ * mixes alongside actual tracks, which are wrong for a music player.
+ *
+ * This is a relevance filter only. It was first added on the theory that long
+ * results were also the ones failing extraction; a controlled test later showed
+ * the real predictor is the upload, not the length — official-channel uploads
+ * return 206 while auto-generated "- Topic" uploads of the same song are
+ * 403-blocked. Do not expect this to affect whether playback succeeds.
  */
 const MAX_SONG_SECONDS = 900;
 /** Circuit breaker: an instance that just failed is skipped for 30 seconds. */
