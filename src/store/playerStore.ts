@@ -4,7 +4,17 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { audioEngine } from "@/lib/audio/engine";
 import { recordPlay } from "@/lib/db/library";
+import { useUiStore } from "@/store/uiStore";
 import type { PlayerState, RepeatMode, Track } from "@/types/music";
+
+/**
+ * How many tracks in a row may fail before playback stops.
+ *
+ * Stream extraction fails per-video often enough that halting on the first bad
+ * track makes a queue feel broken. Skipping past a few keeps listening going,
+ * while the cap stops a dead provider from racing through the whole queue.
+ */
+const MAX_CONSECUTIVE_FAILURES = 3;
 
 type PlayerActions = {
   playQueue: (tracks: Track[], startIndex?: number, origin?: string) => void;
@@ -67,6 +77,9 @@ export const usePlayerStore = create<PlayerStore>()(
         void audioEngine.load(track.sourceId);
         void recordPlay(track);
       };
+
+      /** Consecutive failed loads; reset as soon as anything plays. */
+      let consecutiveFailures = 0;
 
       /** Position of currentIndex within the active play order. */
       const orderPosition = () => {
@@ -264,6 +277,7 @@ export const usePlayerStore = create<PlayerStore>()(
                 if (event.duration > 0) set({ duration: event.duration });
                 break;
               case "playing":
+                consecutiveFailures = 0;
                 set({ isPlaying: true, isLoading: false, error: null });
                 break;
               case "paused":
@@ -276,9 +290,32 @@ export const usePlayerStore = create<PlayerStore>()(
                 set({ isPlaying: false });
                 get().next({ userInitiated: false });
                 break;
-              case "error":
+              case "error": {
+                const state = get();
+                const position = state.order.indexOf(state.currentIndex);
+                const hasNext = position >= 0 && position + 1 < state.order.length;
+
+                // Skip past an unplayable track rather than stalling the queue,
+                // but give up once several in a row fail — at that point the
+                // provider is down and skipping further just burns the queue.
+                if (hasNext && consecutiveFailures + 1 < MAX_CONSECUTIVE_FAILURES) {
+                  consecutiveFailures += 1;
+                  const failed = state.queue[state.currentIndex];
+                  useUiStore
+                    .getState()
+                    .pushToast(
+                      failed ? `Skipped "${failed.title}" — no playable audio` : "Skipped an unplayable track",
+                      "error",
+                    );
+                  set({ isPlaying: false, isLoading: false });
+                  get().next({ userInitiated: false });
+                  break;
+                }
+
+                consecutiveFailures = 0;
                 set({ error: event.message, isPlaying: false, isLoading: false });
                 break;
+              }
             }
           }),
 

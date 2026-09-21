@@ -107,6 +107,16 @@ const DEFAULT_INVIDIOUS = [
 ];
 
 const requestTimeoutMs = 8_000;
+
+/**
+ * Upper bound for a result on the "Songs" tab.
+ *
+ * Provider search happily returns 90-minute concert compilations and "best of"
+ * mixes alongside actual tracks. They are wrong for a music player regardless,
+ * and in practice they are also the results most likely to fail extraction, so
+ * dropping them improves both relevance and the odds that pressing play works.
+ */
+const MAX_SONG_SECONDS = 900;
 /** Circuit breaker: an instance that just failed is skipped for 30 seconds. */
 const failedUntil = new Map<string, number>();
 
@@ -263,6 +273,14 @@ function unwrapPipedSearch(body: PipedSearchResponse): PipedSearchItem[] {
   return body.items ?? [];
 }
 
+/** Keeps long compilations off the Songs tab; other tabs stay unfiltered. */
+function isReasonableForFilter(track: Track, filter: SearchFilter): boolean {
+  if (filter !== "music_songs") return true;
+  // A live stream has no meaningful duration, so never exclude one on length.
+  if (track.isLive || track.durationSeconds == null) return true;
+  return track.durationSeconds <= MAX_SONG_SECONDS;
+}
+
 const PIPED_FILTERS: Record<SearchFilter, string> = {
   all: "all",
   music_songs: "music_songs",
@@ -296,7 +314,8 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
     anyProviderResponded = true;
     const results = unwrapPipedSearch(body)
       .map(normalizePipedTrack)
-      .filter((track): track is Track => track !== null);
+      .filter((track): track is Track => track !== null)
+      .filter((track) => isReasonableForFilter(track, filter));
     if (results.length > 0) return results;
     failures.push("piped:empty");
   } catch (error) {
@@ -309,7 +328,10 @@ export async function searchTracks(query: string, filter: SearchFilter): Promise
       "invidious",
     );
     anyProviderResponded = true;
-    const results = invidious.map(normalizeInvidiousTrack).filter((track): track is Track => track !== null);
+    const results = invidious
+      .map(normalizeInvidiousTrack)
+      .filter((track): track is Track => track !== null)
+      .filter((track) => isReasonableForFilter(track, filter));
     if (results.length > 0) return results;
     failures.push("invidious:empty");
   } catch (error) {
