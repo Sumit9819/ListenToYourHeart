@@ -240,9 +240,14 @@ async function requestProvider<T>(
   {
     deadlineMs = requestTimeoutMs,
     hedgeMs = 2_000,
-  }: { deadlineMs?: number; hedgeMs?: number } = {},
+    exclude = [],
+  }: { deadlineMs?: number; hedgeMs?: number; exclude?: string[] } = {},
 ): Promise<ProviderResponse<T>> {
-  const all = getConfiguredProviders().filter((provider) => provider.kind === kind);
+  // `exclude` lets a caller retry without an instance that answered but whose
+  // answer turned out to be useless — a distinction the transport cannot make.
+  const all = getConfiguredProviders().filter(
+    (provider) => provider.kind === kind && !exclude.includes(provider.origin),
+  );
   const available = all.filter(
     (provider) => (failedUntil.get(`${provider.kind}:${provider.origin}`) ?? 0) <= Date.now(),
   );
@@ -680,13 +685,26 @@ export async function getAudioStream(videoId: string, mode: PlaybackMode = "audi
   // uploads, and its /streams endpoint has been answering HTTP 500 besides — so
   // leading with it spent seconds on a guaranteed failure before reaching the
   // provider that works. It stays on as a fallback in case that changes.
-  try {
-    return await getInvidiousStream(videoId, mode);
-  } catch (invidiousError) {
-    console.warn(
-      `Invidious stream resolution failed for ${videoId}:`,
-      invidiousError instanceof Error ? invidiousError.message : invidiousError,
-    );
+  // Each pass drops an instance that answered with a URL serving something
+  // other than media, so a single bad proxy costs one retry rather than the
+  // whole track. Two passes covers the instances actually configured.
+  const unusable: string[] = [];
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const { stream, origin } = await getInvidiousStream(videoId, mode, unusable);
+      // An HLS manifest is text by definition, so the media probe cannot
+      // judge it; live streams are rare here and fail loudly anyway.
+      if (stream.isHls || (await servesMedia(stream.url))) return stream;
+
+      unusable.push(origin);
+      console.warn(`${origin} resolved ${videoId} to a URL that does not serve media`);
+    } catch (invidiousError) {
+      console.warn(
+        `Invidious stream resolution failed for ${videoId}:`,
+        invidiousError instanceof Error ? invidiousError.message : invidiousError,
+      );
+      break;
+    }
   }
 
   try {
@@ -735,7 +753,55 @@ export async function getAudioStream(videoId: string, mode: PlaybackMode = "audi
   throw new Error("No provider instance could resolve a stream for this track");
 }
 
-async function getInvidiousStream(videoId: string, mode: PlaybackMode): Promise<AudioStream> {
+/** How long to wait on the two-byte check that a URL really serves media. */
+const probeTimeoutMs = 5_000;
+
+/**
+ * Confirms a resolved URL actually hands back media bytes.
+ *
+ * An instance can answer the metadata call perfectly and still return a proxy
+ * URL that serves an HTML error page — `invidious.f5.si` was observed doing
+ * exactly that, HTTP 200 with `text/html`, for tracks a sibling instance
+ * streamed fine. Nothing in the JSON distinguishes the two, so the only honest
+ * test is to ask for the first two bytes and look at what comes back.
+ *
+ * Without this the failure lands in the browser as a media element error, which
+ * reads to the listener as "this song is broken" and skips it — when the song
+ * was fine and the instance was not.
+ */
+async function servesMedia(url: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), probeTimeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: { Range: "bytes=0-1" },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+    // The bytes themselves are not wanted; only the headers were.
+    void response.body?.cancel();
+
+    if (response.status !== 200 && response.status !== 206) return false;
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    // octet-stream is accepted: some proxies decline to guess a media type,
+    // and rejecting those would throw away working streams.
+    return (
+      contentType.startsWith("audio/") ||
+      contentType.startsWith("video/") ||
+      contentType.startsWith("application/octet-stream")
+    );
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getInvidiousStream(
+  videoId: string,
+  mode: PlaybackMode,
+  exclude: string[] = [],
+): Promise<{ stream: AudioStream; origin: string }> {
   // `local=true` asks the instance to serve the media from its own domain
   // instead of handing back a direct googlevideo URL.
   //
@@ -748,7 +814,7 @@ async function getInvidiousStream(videoId: string, mode: PlaybackMode): Promise<
   const { body: video, origin } = await requestProvider<InvidiousVideoResponse>(
     `/api/v1/videos/${encodeURIComponent(videoId)}?local=true`,
     "invidious",
-    { deadlineMs: streamDeadlineMs },
+    { deadlineMs: streamDeadlineMs, exclude },
   );
 
   /** Instances may return proxy URLs relative to their own origin. */
@@ -760,13 +826,16 @@ async function getInvidiousStream(videoId: string, mode: PlaybackMode): Promise<
   if (hlsUrl) {
     // HLS carries video already, so it satisfies either mode.
     return {
-      trackId: `youtube:${videoId}`,
-      url: absolute(hlsUrl),
-      mimeType: "application/vnd.apple.mpegurl",
-      isHls: true,
-      isLive: Boolean(video.liveNow),
-      durationSeconds,
-      kind: mode,
+      origin,
+      stream: {
+        trackId: `youtube:${videoId}`,
+        url: absolute(hlsUrl),
+        mimeType: "application/vnd.apple.mpegurl",
+        isHls: true,
+        isLive: Boolean(video.liveNow),
+        durationSeconds,
+        kind: mode,
+      },
     };
   }
 
@@ -774,16 +843,19 @@ async function getInvidiousStream(videoId: string, mode: PlaybackMode): Promise<
     const muxed = selectMuxedStream(video.formatStreams ?? []);
     if (muxed?.url) {
       return {
-        trackId: `youtube:${videoId}`,
-        url: absolute(muxed.url),
-        mimeType: muxed.mimeType ?? muxed.type ?? "video/mp4",
-        bitrate: Number(muxed.bitrate) || undefined,
-        quality: muxed.quality,
-        qualityLabel: muxed.qualityLabel ?? muxed.quality,
-        isHls: false,
-        isLive: Boolean(video.liveNow),
-        durationSeconds,
-        kind: "video",
+        origin,
+        stream: {
+          trackId: `youtube:${videoId}`,
+          url: absolute(muxed.url),
+          mimeType: muxed.mimeType ?? muxed.type ?? "video/mp4",
+          bitrate: Number(muxed.bitrate) || undefined,
+          quality: muxed.quality,
+          qualityLabel: muxed.qualityLabel ?? muxed.quality,
+          isHls: false,
+          isLive: Boolean(video.liveNow),
+          durationSeconds,
+          kind: "video",
+        },
       };
     }
     // No muxed rendition: fall through to audio so playback still happens.
@@ -798,15 +870,18 @@ async function getInvidiousStream(videoId: string, mode: PlaybackMode): Promise<
   if (!selected?.url) throw new Error("Provider returned no playable audio stream");
 
   return {
-    trackId: `youtube:${videoId}`,
-    url: absolute(selected.url),
-    mimeType: selected.mimeType ?? "audio/mp4",
-    codec: selected.audioQuality,
-    bitrate: selected.bitrate,
-    quality: selected.quality,
-    isHls: false,
-    isLive: Boolean(video.liveNow),
-    durationSeconds,
-    kind: "audio",
+    origin,
+    stream: {
+      trackId: `youtube:${videoId}`,
+      url: absolute(selected.url),
+      mimeType: selected.mimeType ?? "audio/mp4",
+      codec: selected.audioQuality,
+      bitrate: selected.bitrate,
+      quality: selected.quality,
+      isHls: false,
+      isLive: Boolean(video.liveNow),
+      durationSeconds,
+      kind: "audio",
+    },
   };
 }
