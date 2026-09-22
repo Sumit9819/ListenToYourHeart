@@ -17,6 +17,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { SeekBar } from "@/components/player/SeekBar";
 import { PlayerOverflowMenu } from "@/components/player/PlayerOverflowMenu";
 import { WatchButton } from "@/components/player/WatchButton";
@@ -98,6 +99,11 @@ export function PlayerBar() {
       {error && (
         <div role="alert" className="flex items-center gap-3 bg-danger/15 px-4 py-2 text-xs text-danger">
           <span className="min-w-0 flex-1">{error}</span>
+          {/* The moment someone sees this is the moment the checks are worth
+              running, so the way to them is here rather than buried in a menu. */}
+          <Link href="/diagnostics" className="shrink-0 font-semibold underline underline-offset-2">
+            Find out why
+          </Link>
           <button onClick={() => next()} className="shrink-0 font-semibold underline underline-offset-2">
             Skip
           </button>

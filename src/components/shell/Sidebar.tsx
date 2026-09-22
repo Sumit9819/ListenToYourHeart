@@ -1,6 +1,7 @@
 "use client";
 
-import { Heart, History, Home, Library, ListMusic, Plus, Search } from "lucide-react";
+import {
+  Stethoscope, Heart, History, Home, Library, ListMusic, Plus, Search } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
@@ -19,6 +20,7 @@ const PRIMARY_LINKS = [
 const LIBRARY_LINKS = [
   { href: "/liked", label: "Favorites", icon: Heart },
   { href: "/history", label: "Recently played", icon: History },
+  { href: "/diagnostics", label: "Playback check", icon: Stethoscope },
 ] as const;
 
 /** Create-playlist dialog, shared by the sidebar and the library page. */
