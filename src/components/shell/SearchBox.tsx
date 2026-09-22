@@ -108,7 +108,9 @@ export function SearchBox() {
           submit(activeIndex >= 0 ? options[activeIndex] : value);
         }}
       >
-        <div className="flex items-center gap-2.5 rounded-full border border-line bg-surface-raised px-4 py-2 transition focus-within:border-accent/60">
+        {/* The field itself has no focus ring (see globals.css); this border
+            and its soft halo are the focus indicator. */}
+        <div className="flex items-center gap-2.5 rounded-full border border-line bg-surface-raised px-4 py-2 transition focus-within:border-accent/60 focus-within:ring-4 focus-within:ring-accent/10">
           <Search size={17} className="shrink-0 text-ink-faint" />
           <input
             ref={inputRef}

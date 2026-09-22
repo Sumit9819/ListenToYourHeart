@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Check,
   Gauge,
   Maximize,
   Minimize,
@@ -8,6 +9,7 @@ import {
   Pause,
   PictureInPicture2,
   Play,
+  Settings,
   SkipBack,
   SkipForward,
   Volume1,
@@ -23,6 +25,84 @@ import { useUiStore } from "@/store/uiStore";
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 /** How long the controls linger after the pointer stops moving. */
 const HIDE_AFTER_MS = 2600;
+
+/**
+ * Resolution picker.
+ *
+ * Rendered inline rather than through the shared Menu, which portals to the
+ * document body: in fullscreen the browser paints only descendants of the
+ * promoted element, so a portalled menu would open somewhere invisible.
+ */
+function QualityMenu({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
+  const qualities = usePlayerStore((state) => state.videoQualities);
+  const active = usePlayerStore((state) => state.videoQuality);
+  const setVideoQuality = usePlayerStore((state) => state.setVideoQuality);
+  const [open, setOpen] = useState(false);
+
+  // Reported upward because the controls hide themselves after a few idle
+  // seconds, which would take an open menu with them mid-decision.
+  const change = (next: boolean) => {
+    setOpen(next);
+    onOpenChange(next);
+  };
+
+  if (qualities.length === 0) return null;
+
+  const activeLabel = qualities.find((quality) => quality.id === active)?.label ?? "Auto";
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => change(!open)}
+        aria-label={`Resolution: ${activeLabel}`}
+        aria-expanded={open}
+        title="Resolution"
+        className={`flex h-9 items-center gap-1 rounded-full px-2.5 text-xs font-semibold transition hover:bg-white/15 ${
+          active === null ? "text-white/85 hover:text-white" : "text-accent"
+        }`}
+      >
+        <Settings size={17} />
+        {activeLabel}
+      </button>
+
+      {open && (
+        <>
+          {/* Catches the next click anywhere, without a portal. */}
+          <button
+            type="button"
+            aria-hidden="true"
+            tabIndex={-1}
+            onClick={() => change(false)}
+            className="fixed inset-0 cursor-default"
+          />
+          <div
+            role="menu"
+            className="absolute bottom-full right-0 z-10 mb-2 max-h-64 min-w-32 overflow-y-auto rounded-xl border border-white/15 bg-black/90 p-1 shadow-2xl backdrop-blur"
+          >
+            {[{ id: null, label: "Auto", height: 0 }, ...qualities].map((quality) => (
+              <button
+                key={quality.id ?? "auto"}
+                role="menuitemradio"
+                aria-checked={active === quality.id}
+                onClick={() => {
+                  setVideoQuality(quality.id);
+                  change(false);
+                }}
+                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium transition hover:bg-white/15 ${
+                  active === quality.id ? "text-accent" : "text-white/85"
+                }`}
+              >
+                <Check size={13} className={active === quality.id ? "opacity-100" : "opacity-0"} />
+                {quality.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 function IconButton({
   label,
@@ -110,6 +190,7 @@ export function VideoControls({ isFullscreen, onToggleFullscreen }: VideoControl
   const setNowPlayingOpen = useUiStore((state) => state.setNowPlayingOpen);
 
   const [isIdle, setIsIdle] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const hideTimer = useRef<number | null>(null);
 
   /** Any pointer or key activity wakes the controls and restarts the timer. */
@@ -129,7 +210,7 @@ export function VideoControls({ isFullscreen, onToggleFullscreen }: VideoControl
   }, []);
 
   // Hiding the controls over a paused video would just hide the play button.
-  const visible = !isIdle || !isPlaying;
+  const visible = !isIdle || !isPlaying || isMenuOpen;
 
   const { togglePlay, next, previous } = usePlayerStore.getState();
 
@@ -142,9 +223,15 @@ export function VideoControls({ isFullscreen, onToggleFullscreen }: VideoControl
     <div
       onPointerMove={wake}
       onPointerDown={wake}
+      onPointerEnter={wake}
       onFocusCapture={wake}
+      // The root keeps its pointer events even while hidden. Disabling them
+      // here is what made the controls unrecoverable: this element is what
+      // listens for the mouse moving, so switching it off meant no movement
+      // could ever be seen, and the controls never came back. Only the chrome
+      // below opts out, so an invisible button is never clickable.
       className={`absolute inset-0 flex flex-col justify-between transition-opacity duration-200 ${
-        visible ? "opacity-100" : "pointer-events-none opacity-0"
+        visible ? "opacity-100" : "opacity-0"
       } ${isPlaying && isIdle ? "cursor-none" : ""}`}
     >
       {/* Clicking the picture toggles playback, as every other player does. */}
@@ -156,7 +243,7 @@ export function VideoControls({ isFullscreen, onToggleFullscreen }: VideoControl
         tabIndex={-1}
       />
 
-      <div className="relative flex items-start gap-3 bg-gradient-to-b from-black/70 to-transparent px-3 pb-8 pt-2.5 sm:px-4">
+      <div className={`relative flex items-start gap-3 bg-gradient-to-b from-black/70 to-transparent px-3 pb-8 pt-2.5 sm:px-4${visible ? "" : " pointer-events-none"}`}>
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-white">{cleanTrackTitle(track?.title ?? "")}</p>
           <p className="truncate text-xs text-white/70">{cleanArtistName(track?.artist ?? "")}</p>
@@ -179,7 +266,7 @@ export function VideoControls({ isFullscreen, onToggleFullscreen }: VideoControl
         )}
       </div>
 
-      <div className="pointer-events-none relative flex items-center justify-center gap-8">
+      <div className={`pointer-events-none relative flex items-center justify-center gap-8${visible ? "" : " [&_button]:pointer-events-none"}`}>
         <button
           type="button"
           onClick={() => previous()}
@@ -212,7 +299,7 @@ export function VideoControls({ isFullscreen, onToggleFullscreen }: VideoControl
         </button>
       </div>
 
-      <div className="relative bg-gradient-to-t from-black/80 to-transparent px-3 pb-2 pt-8 sm:px-4">
+      <div className={`relative bg-gradient-to-t from-black/80 to-transparent px-3 pb-2 pt-8 sm:px-4${visible ? "" : " pointer-events-none"}`}>
         <SeekBar compact />
         <div className="mt-0.5 flex items-center gap-0.5">
           <span className="mr-1 shrink-0 text-[11px] tabular-nums text-white/80">
@@ -232,6 +319,7 @@ export function VideoControls({ isFullscreen, onToggleFullscreen }: VideoControl
             <Gauge size={17} />
             {playbackRate}x
           </button>
+          <QualityMenu onOpenChange={setIsMenuOpen} />
           <IconButton label="Picture in picture" onClick={togglePictureInPicture}>
             <PictureInPicture2 size={18} />
           </IconButton>

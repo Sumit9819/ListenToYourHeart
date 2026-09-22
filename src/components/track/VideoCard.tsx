@@ -76,9 +76,9 @@ export function VideoCard({ track, context, origin, isLiked }: VideoCardProps) {
           }}
           aria-label={isLiked ? "Remove from favorites" : "Add to favorites"}
           aria-pressed={isLiked}
-          className={`rounded-full p-1.5 transition ${isLiked ? "text-accent" : "text-ink-faint hover:text-ink"}`}
+          className={`grid h-9 w-9 place-items-center rounded-full transition ${isLiked ? "text-accent" : "text-ink-faint hover:text-ink"}`}
         >
-          <Heart size={15} fill={isLiked ? "currentColor" : "none"} />
+          <Heart size={16} fill={isLiked ? "currentColor" : "none"} />
         </button>
         <button
           type="button"
@@ -87,9 +87,9 @@ export function VideoCard({ track, context, origin, isLiked }: VideoCardProps) {
             pushToast("Playing next", "success");
           }}
           aria-label="Play next"
-          className="rounded-full p-1.5 text-ink-faint transition hover:text-ink"
+          className="grid h-9 w-9 place-items-center rounded-full text-ink-faint transition hover:text-ink"
         >
-          <ListPlus size={15} />
+          <ListPlus size={16} />
         </button>
       </div>
     </div>

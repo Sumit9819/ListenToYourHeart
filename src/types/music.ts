@@ -27,6 +27,14 @@ export interface Track {
 /** Which rendition to request: audio-only, or muxed video+audio. */
 export type PlaybackMode = "audio" | "video";
 
+/** One selectable video rendition. `id` is null for the automatic option. */
+export interface VideoQuality {
+  id: number | null;
+  /** "Auto", "1080p", "720p"... */
+  label: string;
+  height: number;
+}
+
 export interface AudioStream {
   trackId: string;
   url: string;
@@ -35,6 +43,15 @@ export interface AudioStream {
   bitrate?: number;
   quality?: string;
   isHls: boolean;
+  /**
+   * The URL is a DASH manifest rather than a single file.
+   *
+   * This is how anything above 360p is reached: YouTube only still serves one
+   * combined video+audio rendition (itag 18, 360p), and every higher quality
+   * exists solely as separate video-only and audio-only streams that a manifest
+   * stitches back together.
+   */
+  isDash?: boolean;
   isLive: boolean;
   durationSeconds?: number;
   /** What the provider actually returned, which may differ from the request. */
@@ -85,6 +102,10 @@ export interface PlayerState {
   hasVideo: boolean;
   /** Epoch ms at which playback should stop, or null when no timer is set. */
   sleepTimerEndsAt: number | null;
+  /** Renditions the current video offers; empty when none or not watching. */
+  videoQualities: VideoQuality[];
+  /** Chosen rendition id, or null while quality is automatic. */
+  videoQuality: number | null;
   /** Keep playing past the end of the queue with provider recommendations. */
   autoplayRadio: boolean;
   /** True while recommendations for the end of the queue are being fetched. */

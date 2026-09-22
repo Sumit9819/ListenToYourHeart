@@ -49,6 +49,8 @@ type PlayerActions = {
   setSleepTimer: (minutes: number | null) => void;
   toggleAutoplayRadio: () => void;
   setPlaybackRate: (rate: number) => void;
+  /** null hands the choice back to the adaptive algorithm. */
+  setVideoQuality: (id: number | null) => void;
   /** Wires engine events into the store. Called once by the app shell. */
   attachEngine: () => () => void;
   hydrateFromStorage: () => void;
@@ -121,6 +123,59 @@ export const usePlayerStore = create<PlayerStore>()(
 
       /** Consecutive failed loads; reset as soon as anything plays. */
       let consecutiveFailures = 0;
+      /** Track ids a substitute upload has already been attempted for. */
+      const alternateTried = new Set<string>();
+
+      /**
+       * Swaps in a different upload of the same song after a failure.
+       *
+       * Extraction fails per upload, not per song: the same recording is
+       * usually on YouTube several times over, and when one copy will not
+       * extract another routinely does. Skipping instead reads to the listener
+       * as "this song is broken", which is rarely what happened.
+       *
+       * Resolves true when something is now loading.
+       */
+      const tryAlternateUpload = async (): Promise<boolean> => {
+        const state = get();
+        const track = state.queue[state.currentIndex];
+        if (!track || alternateTried.has(track.id)) return false;
+        alternateTried.add(track.id);
+
+        try {
+          const params = new URLSearchParams({
+            artist: track.artist,
+            title: track.title,
+            exclude: track.sourceId,
+          });
+          if (track.durationSeconds) params.set("duration", String(track.durationSeconds));
+
+          const response = await fetch(`/api/alternate?${params}`);
+          const { track: match } = (await response.json()) as { track: Track | null };
+          if (!match) return false;
+
+          // The listener moved on while the search was running.
+          const now = get();
+          const index = now.currentIndex;
+          if (now.queue[index]?.id !== track.id) return false;
+
+          // Marked before loading: if the substitute fails too, the next error
+          // must skip rather than start searching all over again.
+          alternateTried.add(match.id);
+
+          // The queue entry is replaced so replaying later uses the copy that
+          // works, and the row keeps the kind the original was found under.
+          const queue = now.queue.map((entry, position) =>
+            position === index ? { ...match, kind: entry.kind } : entry,
+          );
+          set({ queue, isLoading: true, error: null, videoSourceId: null });
+          void audioEngine.load(match.sourceId, { mode: now.playbackMode });
+          useUiStore.getState().pushToast("Found this song from another source");
+          return true;
+        } catch {
+          return false;
+        }
+      };
       /** Handle for the sleep timer, so a new one replaces the old. */
       let sleepTimeout: number | null = null;
 
@@ -186,6 +241,8 @@ export const usePlayerStore = create<PlayerStore>()(
         autoplayRadio: true,
         isExtendingQueue: false,
         playbackRate: 1,
+        videoQualities: [],
+        videoQuality: null,
 
         playQueue: (tracks, start = 0, origin) => {
           if (!tracks.length) return;
@@ -491,6 +548,10 @@ export const usePlayerStore = create<PlayerStore>()(
 
         toggleAutoplayRadio: () => set((state) => ({ autoplayRadio: !state.autoplayRadio })),
 
+        // No state is set here: the engine confirms through its "qualities"
+        // event, so the UI can never show a rendition the player declined.
+        setVideoQuality: (id) => audioEngine.setVideoQuality(id),
+
         setPlaybackRate: (rate) => {
           const clamped = Math.max(0.25, Math.min(rate, 2));
           audioEngine.setPlaybackRate(clamped);
@@ -519,6 +580,9 @@ export const usePlayerStore = create<PlayerStore>()(
             switch (event.type) {
               case "videoavailable":
                 set({ hasVideo: event.hasVideo });
+                break;
+              case "qualities":
+                set({ videoQualities: event.qualities, videoQuality: event.active });
                 break;
               case "videounavailable":
                 // The audio rendition is already loading, so this is a mode
@@ -550,29 +614,46 @@ export const usePlayerStore = create<PlayerStore>()(
                 get().next({ userInitiated: false });
                 break;
               case "error": {
-                const state = get();
-                const position = state.order.indexOf(state.currentIndex);
-                const hasNext = position >= 0 && position + 1 < state.order.length;
+                const giveUp = () => {
+                  const state = get();
+                  const position = state.order.indexOf(state.currentIndex);
+                  const hasNext = position >= 0 && position + 1 < state.order.length;
 
-                // Skip past an unplayable track rather than stalling the queue,
-                // but give up once several in a row fail — at that point the
-                // provider is down and skipping further just burns the queue.
-                if (hasNext && consecutiveFailures + 1 < MAX_CONSECUTIVE_FAILURES) {
-                  consecutiveFailures += 1;
-                  const failed = state.queue[state.currentIndex];
-                  useUiStore
-                    .getState()
-                    .pushToast(
-                      failed ? `Skipped "${failed.title}" — no playable audio` : "Skipped an unplayable track",
-                      "error",
-                    );
-                  set({ isPlaying: false, isLoading: false });
-                  get().next({ userInitiated: false });
+                  // Skip past an unplayable track rather than stalling the
+                  // queue, but give up once several in a row fail — at that
+                  // point the provider is down and skipping further just burns
+                  // through the queue.
+                  if (hasNext && consecutiveFailures + 1 < MAX_CONSECUTIVE_FAILURES) {
+                    consecutiveFailures += 1;
+                    const failed = state.queue[state.currentIndex];
+                    useUiStore
+                      .getState()
+                      .pushToast(
+                        failed ? `Skipped "${failed.title}" — no playable audio` : "Skipped an unplayable track",
+                        "error",
+                      );
+                    set({ isPlaying: false, isLoading: false });
+                    get().next({ userInitiated: false });
+                    return;
+                  }
+
+                  consecutiveFailures = 0;
+                  set({ error: event.message, isPlaying: false, isLoading: false });
+                };
+
+                // Before writing the track off, look for another upload of the
+                // same song. Skipping first is what made a perfectly ordinary
+                // track look broken.
+                const current = get().queue[get().currentIndex];
+                if (current && !alternateTried.has(current.id)) {
+                  set({ isLoading: true });
+                  void tryAlternateUpload().then((recovered) => {
+                    if (!recovered) giveUp();
+                  });
                   break;
                 }
 
-                consecutiveFailures = 0;
-                set({ error: event.message, isPlaying: false, isLoading: false });
+                giveUp();
                 break;
               }
             }

@@ -28,6 +28,7 @@
     "pg": "^8.23.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
+    "shaka-player": "^5.2.11",
     "zustand": "^5.0.15"
   },
   "devDependencies": {

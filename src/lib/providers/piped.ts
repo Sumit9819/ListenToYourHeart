@@ -545,6 +545,65 @@ export async function findMusicVideo(
   return best && best.score >= 30 ? best.track : null;
 }
 
+/**
+ * Finds a different upload of the same song.
+ *
+ * Extraction failure is per-upload, not per-song: the same track is usually on
+ * YouTube several times over — the label's channel, the auto-generated Topic
+ * version, a re-upload — and when one of them will not extract, another
+ * routinely will. Skipping the track outright throws that away and reads to the
+ * listener as "this song is broken", which is rarely true.
+ *
+ * Deliberately stricter than findMusicVideo about *what* it will substitute:
+ * quietly playing a karaoke version or a cover in place of the real recording
+ * would be worse than the failure it is recovering from.
+ */
+export async function findAlternateUpload(
+  artist: string,
+  title: string,
+  excludeSourceId: string,
+  durationSeconds?: number,
+): Promise<Track | null> {
+  const cleanArtist = artist.replace(/\s*-\s*Topic\s*$/i, "").trim();
+  const candidates = await searchTracks(`${cleanArtist} ${title}`, "music_songs");
+
+  const scored = candidates
+    .filter((track) => track.sourceId !== excludeSourceId)
+    .filter((track) => !track.isLive)
+    .map((track) => {
+      let score = 0;
+      const haystack = track.title.toLowerCase();
+
+      // Same length means same recording, which is the whole point here.
+      if (durationSeconds && track.durationSeconds) {
+        const drift = Math.abs(track.durationSeconds - durationSeconds);
+        if (drift <= 2) score += 60;
+        else if (drift <= 6) score += 40;
+        else if (drift <= 15) score += 10;
+        else score -= 40;
+      } else {
+        // With nothing to compare, the risk of substituting the wrong
+        // recording is too high to take on title similarity alone.
+        score -= 20;
+      }
+
+      if (track.artist.toLowerCase() === cleanArtist.toLowerCase()) score += 30;
+      else if (track.artist.toLowerCase().includes(cleanArtist.toLowerCase())) score += 15;
+      else score -= 25;
+
+      if (haystack.includes(title.toLowerCase())) score += 15;
+      if (/(cover|remix|karaoke|instrumental|reaction|tutorial|8d|slowed|sped up|nightcore)/.test(haystack)) {
+        score -= 60;
+      }
+
+      return { track, score };
+    })
+    .sort((left, right) => right.score - left.score);
+
+  const best = scored[0];
+  return best && best.score >= 60 ? best.track : null;
+}
+
 export interface InstanceHealth {
   origin: string;
   kind: ProviderKind;
@@ -692,9 +751,10 @@ export async function getAudioStream(videoId: string, mode: PlaybackMode = "audi
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const { stream, origin } = await getInvidiousStream(videoId, mode, unusable);
-      // An HLS manifest is text by definition, so the media probe cannot
-      // judge it; live streams are rare here and fail loudly anyway.
-      if (stream.isHls || (await servesMedia(stream.url))) return stream;
+      // HLS and DASH point at manifests, not media: HLS is text by definition
+      // and rare enough here to let through, and DASH was already verified
+      // where it was chosen.
+      if (stream.isHls || stream.isDash || (await servesMedia(stream.url))) return stream;
 
       unusable.push(origin);
       console.warn(`${origin} resolved ${videoId} to a URL that does not serve media`);
@@ -797,6 +857,32 @@ async function servesMedia(url: string): Promise<boolean> {
   }
 }
 
+/**
+ * Confirms a DASH manifest exists and is really a manifest.
+ *
+ * Same failure mode as servesMedia guards against, one level up: an instance
+ * that cannot extract a video still answers this URL, just with an error page.
+ * A manifest is XML and a real one is never tiny, so both are checked.
+ */
+async function servesManifest(url: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), probeTimeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal, cache: "no-store" });
+    if (!response.ok) return false;
+    if (!/xml/i.test(response.headers.get("content-type") ?? "")) {
+      void response.body?.cancel();
+      return false;
+    }
+    const body = await response.text();
+    return body.length > 500 && body.includes("<MPD");
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function getInvidiousStream(
   videoId: string,
   mode: PlaybackMode,
@@ -840,6 +926,34 @@ async function getInvidiousStream(
   }
 
   if (mode === "video") {
+    // A DASH manifest first, because it is the only route to anything above
+    // 360p. YouTube stopped serving a 720p muxed rendition years ago: itag 18
+    // is the one combined stream left, and 480p/720p/1080p exist purely as
+    // video-only tracks that need pairing with a separate audio track. The
+    // manifest describes every rendition, so it also makes the quality
+    // selector possible at all.
+    const hasAdaptiveVideo = (video.adaptiveFormats ?? []).some((format) => /video/i.test(format.type ?? ""));
+    if (hasAdaptiveVideo) {
+      const dashUrl = `${origin}/api/manifest/dash/id/${encodeURIComponent(videoId)}?local=true`;
+      // Probed here rather than by the caller: a manifest that does not load
+      // should fall back to the muxed rendition below, not fail the track.
+      if (await servesManifest(dashUrl)) {
+        return {
+          origin,
+          stream: {
+            trackId: `youtube:${videoId}`,
+            url: dashUrl,
+            mimeType: "application/dash+xml",
+            isHls: false,
+            isDash: true,
+            isLive: Boolean(video.liveNow),
+            durationSeconds,
+            kind: "video",
+          },
+        };
+      }
+    }
+
     const muxed = selectMuxedStream(video.formatStreams ?? []);
     if (muxed?.url) {
       return {

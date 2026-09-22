@@ -1,7 +1,38 @@
 "use client";
 
 import type Hls from "hls.js";
-import type { PlaybackMode } from "@/types/music";
+import type { PlaybackMode, VideoQuality } from "@/types/music";
+
+/**
+ * The slice of shaka-player this file uses.
+ *
+ * Declared locally rather than imported: the library is 191KB gzipped and only
+ * loads when someone actually watches something, so pulling its types in at the
+ * top would drag the module into the main bundle for everyone who never does.
+ */
+interface ShakaTrack {
+  id: number;
+  type: string;
+  height: number | null;
+  width: number | null;
+  bandwidth: number;
+  active: boolean;
+}
+
+interface ShakaPlayer {
+  attach(element: HTMLMediaElement): Promise<void>;
+  load(url: string): Promise<void>;
+  destroy(): Promise<void>;
+  getVariantTracks(): ShakaTrack[];
+  selectVariantTrack(track: ShakaTrack, clearBuffer?: boolean): void;
+  configure(key: string, value: unknown): void;
+  addEventListener(type: string, listener: (event: unknown) => void): void;
+}
+
+interface ShakaModule {
+  Player: { new (): ShakaPlayer; isBrowserSupported(): boolean };
+  polyfill: { installAll(): void };
+}
 
 export type EngineEvent =
   | { type: "time"; currentTime: number; buffered: number }
@@ -14,7 +45,9 @@ export type EngineEvent =
   /** Fires once a rendition's dimensions are known, so the UI can show a stage. */
   | { type: "videoavailable"; hasVideo: boolean }
   /** A video rendition could not be resolved, but the audio one could. */
-  | { type: "videounavailable" };
+  | { type: "videounavailable" }
+  /** The selectable renditions changed, or the active one did. */
+  | { type: "qualities"; qualities: VideoQuality[]; active: number | null };
 
 type Listener = (event: EngineEvent) => void;
 
@@ -36,9 +69,12 @@ class AudioEngine {
    */
   private element: HTMLVideoElement | null = null;
   private hls: Hls | null = null;
+  private dash: ShakaPlayer | null = null;
   private listeners = new Set<Listener>();
   /** Guards against a slow stream resolution landing after the user moved on. */
   private loadToken = 0;
+  /** Chosen rendition id, or null while quality is automatic. */
+  private manualQualityId: number | null = null;
   private currentSourceId: string | null = null;
 
   private ensureElement(): HTMLVideoElement {
@@ -95,6 +131,98 @@ class AudioEngine {
     this.hls = null;
   }
 
+  private teardownDash() {
+    const player = this.dash;
+    this.dash = null;
+    // Destroying detaches from the element, which must finish before a new
+    // source is attached, but nothing downstream needs to wait for it.
+    void player?.destroy().catch(() => {});
+  }
+
+  /** Renditions the current manifest offers, newest measurement each call. */
+  getVideoQualities(): VideoQuality[] {
+    if (!this.dash) return [];
+    const seen = new Map<number, VideoQuality>();
+    for (const track of this.dash.getVariantTracks()) {
+      const height = track.height ?? 0;
+      if (height <= 0) continue;
+      // A manifest lists the same height at several bitrates and codecs.
+      // Listing "720p" three times is noise, so keep the first of each.
+      if (!seen.has(height)) seen.set(height, { id: track.id, label: `${height}p`, height });
+    }
+    return [...seen.values()].sort((left, right) => right.height - left.height);
+  }
+
+  /** The active rendition's id, or null while quality is automatic. */
+  getActiveQuality(): number | null {
+    return this.manualQualityId;
+  }
+
+  /** Pass null to hand the choice back to the adaptive algorithm. */
+  setVideoQuality(id: number | null): void {
+    const player = this.dash;
+    if (!player) return;
+
+    if (id === null) {
+      this.manualQualityId = null;
+      player.configure("abr.enabled", true);
+      this.emitQualities();
+      return;
+    }
+
+    const track = player.getVariantTracks().find((candidate) => candidate.id === id);
+    if (!track) return;
+    // Disabling adaptation first, or the algorithm immediately overrides the
+    // choice on the next bandwidth sample.
+    player.configure("abr.enabled", false);
+    player.selectVariantTrack(track, true);
+    this.manualQualityId = id;
+    this.emitQualities();
+  }
+
+  private emitQualities() {
+    this.emit({ type: "qualities", qualities: this.getVideoQualities(), active: this.manualQualityId });
+  }
+
+  /** Loads a DASH manifest through shaka-player. Throws if it cannot play. */
+  private async attachDash(url: string, token: number): Promise<void> {
+    const element = this.ensureElement();
+    const loaded = (await import("shaka-player/dist/shaka-player.dash.js")) as unknown as {
+      default?: ShakaModule;
+    } & ShakaModule;
+    if (token !== this.loadToken) return;
+
+    const shaka = loaded.default ?? loaded;
+    shaka.polyfill.installAll();
+    if (!shaka.Player.isBrowserSupported()) throw new Error("This browser cannot play adaptive video.");
+
+    const player = new shaka.Player();
+    await player.attach(element);
+    if (token !== this.loadToken) {
+      void player.destroy().catch(() => {});
+      return;
+    }
+
+    player.addEventListener("error", () => {
+      if (this.dash === player) this.emit({ type: "error", message: "The video stream failed." });
+    });
+    // Adaptation picks a new rendition as bandwidth changes; the label has to
+    // follow, or it goes stale the moment the network does.
+    player.addEventListener("adaptation", () => {
+      if (this.dash === player) this.emitQualities();
+    });
+
+    await player.load(url);
+    if (token !== this.loadToken) {
+      void player.destroy().catch(() => {});
+      return;
+    }
+
+    this.dash = player;
+    this.manualQualityId = null;
+    this.emitQualities();
+  }
+
   /** Resolves a stream URL for `sourceId` and starts playback. */
   async load(
     sourceId: string,
@@ -106,7 +234,7 @@ class AudioEngine {
 
     this.emit({ type: "waiting" });
 
-    let stream: { url: string; isHls: boolean; kind?: PlaybackMode };
+    let stream: { url: string; isHls: boolean; isDash?: boolean; kind?: PlaybackMode };
     try {
       stream = await this.resolveStream(sourceId, mode);
     } catch (error) {
@@ -135,10 +263,25 @@ class AudioEngine {
     if (token !== this.loadToken) return;
 
     this.teardownHls();
+    this.teardownDash();
+    this.manualQualityId = null;
+    this.emit({ type: "qualities", qualities: [], active: null });
     element.removeAttribute("src");
 
     const nativeHls = element.canPlayType("application/vnd.apple.mpegurl") !== "";
-    if (stream.isHls && !nativeHls) {
+    if (stream.isDash) {
+      try {
+        await this.attachDash(stream.url, token);
+        if (token !== this.loadToken) return;
+      } catch (error) {
+        if (token !== this.loadToken) return;
+        this.emit({
+          type: "error",
+          message: error instanceof Error ? error.message : "The video could not be played.",
+        });
+        return;
+      }
+    } else if (stream.isHls && !nativeHls) {
       const { default: HlsCtor } = await import("hls.js");
       if (token !== this.loadToken) return;
       if (!HlsCtor.isSupported()) {
@@ -173,10 +316,10 @@ class AudioEngine {
   private async resolveStream(
     sourceId: string,
     mode: PlaybackMode,
-  ): Promise<{ url: string; isHls: boolean; kind?: PlaybackMode }> {
+  ): Promise<{ url: string; isHls: boolean; isDash?: boolean; kind?: PlaybackMode }> {
     const response = await fetch(`/api/streams/${encodeURIComponent(sourceId)}?mode=${mode}`);
     const body = (await response.json()) as {
-      stream?: { url: string; isHls: boolean; kind?: PlaybackMode };
+      stream?: { url: string; isHls: boolean; isDash?: boolean; kind?: PlaybackMode };
       error?: string;
     };
     if (!response.ok || !body.stream) throw new Error(body.error ?? "No playable stream was found.");
@@ -257,6 +400,7 @@ class AudioEngine {
     this.loadToken += 1;
     this.currentSourceId = null;
     this.teardownHls();
+    this.teardownDash();
     const element = this.element;
     if (!element) return;
     element.pause();

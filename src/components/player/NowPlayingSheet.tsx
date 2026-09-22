@@ -139,12 +139,22 @@ export function NowPlayingSheet() {
         // Transport and seeking are deliberately absent here — they live on the
         // video itself. Duplicating them below the stage is what pushed the
         // controls off the bottom of the screen and made pausing a scroll away.
-        <div className="relative z-10 grid min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:overflow-hidden">
-          <div className="flex min-w-0 flex-col gap-3 lg:overflow-y-auto">
-            {/* VideoStage measures this box and pins itself to it. */}
-            <div id={VIDEO_SLOT_ID} className="aspect-video w-full rounded-xl bg-black" aria-hidden="true" />
+        // Nothing here scrolls except the queue's own list. The stage is a
+        // fixed overlay, so a wheel or swipe over the video never reached a
+        // scroll container underneath it — the fix is to have no page-level
+        // scrolling to reach, and to give the queue a scroller of its own.
+        <div className="relative z-10 grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-4 overflow-hidden px-4 py-4 sm:px-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:grid-rows-1">
+          <div className="flex min-h-0 min-w-0 flex-col gap-3">
+            {/* VideoStage measures this box and pins itself to it. On a phone
+                it keeps its 16:9 shape at the top; on a wide screen it takes
+                the leftover height and the element letterboxes inside it. */}
+            <div
+              id={VIDEO_SLOT_ID}
+              className="aspect-video w-full shrink-0 rounded-xl bg-black lg:aspect-auto lg:min-h-0 lg:flex-1"
+              aria-hidden="true"
+            />
 
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
               <div className="min-w-0">
                 <h1 className="truncate text-lg font-bold leading-snug sm:text-xl">{cleanTrackTitle(track.title)}</h1>
                 <p className="mt-0.5 truncate text-sm text-ink-muted">{cleanArtistName(track.artist)}</p>
@@ -153,12 +163,12 @@ export function NowPlayingSheet() {
             </div>
           </div>
 
-          <aside className="flex min-h-0 flex-col rounded-xl border border-line bg-surface-raised p-3 lg:overflow-hidden">
+          <aside className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-line bg-surface-raised p-3">
             <div className="mb-2 flex items-baseline justify-between px-1">
               <h2 className="text-sm font-semibold">Up next</h2>
               <span className="text-xs text-ink-faint">{pluralize(queueLength, "track")}</span>
             </div>
-            <div className="min-h-0 flex-1 lg:overflow-y-auto">
+            <div className="min-h-0 flex-1 overflow-y-auto">
               <QueueList compact />
             </div>
           </aside>
